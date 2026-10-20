@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "policy": {
+    "min_score": 0.55,
+    "reject_score": 0.35,
+    "margin": 0.06,
+    "antonym_margin": 0.7,
+    "confirm_high_risk": true,
+    "fuzzy_max_risk": "medium",
+    "max_options": 4,
+    "beam": 8
+  },
+  "execution": {
+    "deadline_ms": 8000,
+    "max_attempts": 4,
+    "backoff_ms": 100,
+    "backoff_factor": 2.0,
+    "jitter": 0.2,
+    "rollback_attempts": 3,
+    "rollback_deadline_ms": 6000,
+    "read_latency_ms": 30
+  },
+  "rooms": [
+    {"id": "kitchen", "aliases": ["кухня", "кухне", "кухню", "кухонный", "кухонная"]},
+    {"id": "living", "aliases": ["гостиная", "гостиной", "зал", "зале", "зала"]},
+    {"id": "bedroom", "aliases": ["спальня", "спальне", "спальню"]},
+    {"id": "hall", "aliases": ["прихожая", "прихожей", "коридор", "коридоре"]},
+    {"id": "bathroom", "aliases": ["ванная", "ванной", "санузел", "санузле"]},
+    {"id": "kids", "aliases": ["детская", "детской"]},
+    {"id": "lab", "aliases": ["лаборатория", "лаборатории", "мастерская", "мастерской"]}
+  ],
+  "actions": [
+    {"id": "turn_on", "title": "включить", "risk": "low", "antonym": "turn_off", "frequency": 100,
+     "aliases": ["включи", "включить", "включите", "включай", "вруби", "врубить", "зажги", "зажечь",
+                 "активируй",
+                 {"alias": "поставь на охрану", "hint": "alarm"},
+                 {"alias": "вскипяти", "hint": "kettle"},
+                 {"alias": "поставь чайник", "hint": "kettle"}]},
+    {"id": "turn_off", "title": "выключить", "risk": "low", "antonym": "turn_on", "frequency": 90,
+     "aliases": ["выключи", "выключить", "выключите", "выключай", "выруби", "вырубить", "погаси",
+                 "погасить", "отключи", "отключить", "деактивируй",
+                 {"alias": "сними с охраны", "hint": "alarm"},
+                 {"alias": "припаркуй", "hint": "arm"}]},
+    {"id": "open", "title": "открыть", "risk": "low", "antonym": "close", "frequency": 40,
+     "aliases": ["открой", "открыть", "откройте", "раскрой", "раздвинь", "отопри", "отпереть", "отвори"]},
+    {"id": "close", "title": "закрыть", "risk": "low", "antonym": "open", "frequency": 45,
+     "aliases": ["закрой", "закрыть", "закройте", "задвинь", "запри", "запереть", "затвори",
+                 {"alias": "перекрой", "hint": "valve"}]},
+    {"id": "set_brightness", "title": "установить яркость", "risk": "low", "requires_value": true, "frequency": 20,
+     "aliases": ["яркость", "яркости"]},
+    {"id": "set_temperature", "title": "установить температуру", "risk": "low", "requires_value": true, "frequency": 25,
+     "aliases": ["температура", "температуру", "температуры", "нагрей", "нагреть"]},
+    {"id": "set_volume", "title": "установить громкость", "risk": "low", "requires_value": true, "frequency": 15,
+     "aliases": ["громкость", "громкости"]},
+    {"id": "start", "title": "запустить", "risk": "low", "antonym": "stop", "frequency": 20,
+     "aliases": ["запусти", "запустить", "начни", "стартуй",
+                 {"alias": "пропылесось", "hint": "vacuum"},
+                 {"alias": "начни уборку", "hint": "vacuum"},
+                 {"alias": "уберись", "hint": "vacuum"}]},
+    {"id": "stop", "title": "остановить", "risk": "low", "antonym": "start", "frequency": 15,
+     "aliases": ["останови", "остановить", "стоп", "прекрати", "пауза", {"alias": "поставь на паузу"}]},
+    {"id": "dock", "title": "отправить на базу", "risk": "low", "frequency": 10,
+     "aliases": [{"alias": "на базу", "hint": "vacuum"}, {"alias": "вернись на базу", "hint": "vacuum"},
+                 {"alias": "на зарядку", "hint": "vacuum"}]},
+    {"id": "grasp", "title": "взять", "risk": "medium", "antonym": "release", "target_kind": "object",
+     "performer": "arm", "frequency": 30,
+     "aliases": ["возьми", "взять", "схвати", "захвати", "бери", "подбери", "подними"]},
+    {"id": "release", "title": "положить", "risk": "low", "antonym": "grasp", "frequency": 25,
+     "aliases": ["положи", "положить", "отпусти", "отпустить", "опусти", "брось", "оставь"]}
+  ],
+  "device_types": [
+    {"id": "light", "title": "свет", "group_ok": true, "timeout_ms": 1500, "latency_ms": 120,
+     "aliases": ["свет", "света", "лампа", "лампу", "лампочка", "лампочку", "освещение", "светильник"],
+     "states": ["off", "on"], "initial": "off",
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "auto": true},
+       {"action": "turn_off", "from": ["on"], "to": "off"},
+       {"action": "set_brightness", "from": "*", "to": "on", "value": "brightness", "range": [1, 100]}
+     ]},
+    {"id": "socket", "title": "розетка", "timeout_ms": 1500, "latency_ms": 100,
+     "aliases": ["розетка", "розетку", "розетки"],
+     "states": ["off", "on"],
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "risk": "medium"},
+       {"action": "turn_off", "from": ["on"], "to": "off"}
+     ]},
+    {"id": "tv", "title": "телевизор", "timeout_ms": 3000, "latency_ms": 600,
+     "aliases": ["телевизор", "телек", "телик", "тв", "телевизора"],
+     "states": ["off", "on"],
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "auto": true},
+       {"action": "turn_off", "from": ["on"], "to": "off"},
+       {"action": "set_volume", "from": ["on"], "to": "=", "value": "volume", "range": [0, 100]}
+     ]},
+    {"id": "ac", "title": "кондиционер", "timeout_ms": 2500, "latency_ms": 400,
+     "aliases": ["кондиционер", "кондиционера", "кондей", "кондер", "сплит", "сплит-система"],
+     "states": ["off", "on"],
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "auto": true},
+       {"action": "turn_off", "from": ["on"], "to": "off"},
+       {"action": "set_temperature", "from": ["on"], "to": "=", "value": "temperature", "range": [16, 30]}
+     ]},
+    {"id": "heated_floor", "title": "тёплый пол", "timeout_ms": 2000, "latency_ms": 200,
+     "aliases": ["теплый пол", "теплые полы", "подогрев пола"],
+     "states": ["off", "on"],
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "auto": true},
+       {"action": "turn_off", "from": ["on"], "to": "off"},
+       {"action": "set_temperature", "from": ["on"], "to": "=", "value": "temperature", "range": [20, 40]}
+     ]},
+    {"id": "oven", "title": "духовка", "timeout_ms": 2000, "latency_ms": 250,
+     "aliases": ["духовка", "духовку", "духовки", "плита", "плиту", "плиты"],
+     "states": ["off", "on"],
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "risk": "high", "auto": true},
+       {"action": "turn_off", "from": ["on"], "to": "off"},
+       {"action": "set_temperature", "from": ["on"], "to": "=", "value": "temperature", "range": [50, 250], "risk": "medium"}
+     ]},
+    {"id": "kettle", "title": "чайник", "timeout_ms": 1500, "latency_ms": 150,
+     "aliases": ["чайник", "чайника"],
+     "states": ["off", "on"],
+     "transitions": [
+       {"action": "turn_on", "from": ["off"], "to": "on", "risk": "medium"},
+       {"action": "turn_off", "from": ["on"], "to": "off"}
+     ]},
+    {"id": "curtains", "title": "шторы", "group_ok": true, "timeout_ms": 4000, "latency_ms": 900,
+     "aliases": ["шторы", "штора", "штору", "занавески", "жалюзи", "портьеры"],
+     "states": ["closed", "open"], "initial": "closed",
+     "transitions": [
+       {"action": "open", "from": ["closed"], "to": "open"},
+       {"action": "close", "from": ["open"], "to": "closed"}
+     ]},
+    {"id": "door_lock", "title": "замок двери", "timeout_ms": 3000, "latency_ms": 500,
+     "aliases": ["дверь", "двери", "замок", "замка", "входная дверь", "входную дверь"],
+     "states": ["locked", "unlocked"], "initial": "locked",
+     "transitions": [
+       {"action": "open", "from": ["locked"], "to": "unlocked", "risk": "high"},
+       {"action": "close", "from": ["unlocked"], "to": "locked", "risk": "medium"}
+     ]},
+    {"id": "valve", "title": "кран воды", "timeout_ms": 3000, "latency_ms": 700,
+     "aliases": ["кран", "воду", "вода", "водопровод", "подачу воды"],
+     "states": ["closed", "open"], "initial": "open",
+     "transitions": [
+       {"action": "open", "from": ["closed"], "to": "open", "risk": "medium"},
+       {"action": "close", "from": ["open"], "to": "closed"}
+     ]},
+    {"id": "alarm", "title": "сигнализация", "timeout_ms": 2500, "latency_ms": 300,
+     "aliases": ["сигнализация", "сигнализацию", "сигналка", "сигналку", "охрана", "охрану"],
+     "states": ["disarmed", "armed"], "initial": "disarmed",
+     "transitions": [
+       {"action": "turn_on", "from": ["disarmed"], "to": "armed", "risk": "medium"},
+       {"action": "turn_off", "from": ["armed"], "to": "disarmed", "risk": "high"}
+     ]},
+    {"id": "vacuum", "title": "пылесос", "timeout_ms": 3000, "latency_ms": 400,
+     "aliases": ["пылесос", "робот-пылесос", "робот пылесос", "пылесоса"],
+     "states": ["docked", "cleaning", "paused"], "initial": "docked",
+     "transitions": [
+       {"action": "start", "from": ["docked", "paused"], "to": "cleaning"},
+       {"action": "stop", "from": ["cleaning"], "to": "paused"},
+       {"action": "dock", "from": ["cleaning", "paused"], "to": "docked"}
+     ]},
+    {"id": "arm", "title": "манипулятор", "timeout_ms": 5000, "latency_ms": 1200,
+     "aliases": ["манипулятор", "манипулятора", "рука", "руку", "робот-рука", "робо-рука"],
+     "states": ["parked", "ready", "holding"], "initial": "parked",
+     "transitions": [
+       {"action": "turn_on", "from": ["parked"], "to": "ready", "auto": true},
+       {"action": "turn_off", "from": ["ready"], "to": "parked"},
+       {"action": "grasp", "from": ["ready"], "to": "holding", "guard": "object_visible"},
+       {"action": "release", "from": ["holding"], "to": "ready"}
+     ]}
+  ],
+  "devices": [
+    {"id": "kitchen_light", "type": "light", "room": "kitchen", "name": "свет на кухне", "frequency": 40,
+     "aliases": ["кухонный свет", "свет на кухне"]},
+    {"id": "living_chandelier", "type": "light", "room": "living", "name": "люстра в гостиной", "frequency": 30,
+     "aliases": ["люстра", "люстру", "люстры"]},
+    {"id": "living_floor_lamp", "type": "light", "room": "living", "name": "торшер", "frequency": 12,
+     "aliases": ["торшер", "торшера"]},
+    {"id": "bedroom_light", "type": "light", "room": "bedroom", "name": "свет в спальне", "frequency": 25,
+     "aliases": []},
+    {"id": "bedside_lamp", "type": "light", "room": "bedroom", "name": "ночник", "frequency": 15,
+     "aliases": ["ночник", "ночника", "прикроватная лампа"]},
+    {"id": "hall_light", "type": "light", "room": "hall", "name": "свет в прихожей", "frequency": 20,
+     "aliases": []},
+    {"id": "bathroom_light", "type": "light", "room": "bathroom", "name": "свет в ванной", "frequency": 22,
+     "aliases": []},
+    {"id": "kids_light", "type": "light", "room": "kids", "name": "свет в детской", "frequency": 10,
+     "aliases": []},
+    {"id": "lab_light", "type": "light", "room": "lab", "name": "свет в лаборатории", "frequency": 5,
+     "aliases": []},
+    {"id": "kitchen_socket", "type": "socket", "room": "kitchen", "name": "розетка на кухне", "frequency": 5,
+     "aliases": []},
+    {"id": "kids_socket", "type": "socket", "room": "kids", "name": "розетка в детской", "frequency": 3,
+     "aliases": []},
+    {"id": "living_tv", "type": "tv", "room": "living", "name": "телевизор", "frequency": 35,
+     "values": {"volume": 20}, "aliases": []},
+    {"id": "living_ac", "type": "ac", "room": "living", "name": "кондиционер в гостиной", "frequency": 18,
+     "values": {"temperature": 24}, "aliases": []},
+    {"id": "bedroom_ac", "type": "ac", "room": "bedroom", "name": "кондиционер в спальне", "frequency": 14,
+     "values": {"temperature": 22}, "aliases": []},
+    {"id": "bathroom_floor", "type": "heated_floor", "room": "bathroom", "name": "тёплый пол", "frequency": 8,
+     "values": {"temperature": 28}, "aliases": []},
+    {"id": "kitchen_oven", "type": "oven", "room": "kitchen", "name": "духовка", "frequency": 6,
+     "values": {"temperature": 180}, "aliases": []},
+    {"id": "kitchen_kettle", "type": "kettle", "room": "kitchen", "name": "чайник", "frequency": 20,
+     "aliases": []},
+    {"id": "living_curtains", "type": "curtains", "room": "living", "name": "шторы в гостиной", "frequency": 12,
+     "aliases": []},
+    {"id": "bedroom_curtains", "type": "curtains", "room": "bedroom", "name": "шторы в спальне", "frequency": 10,
+     "aliases": []},
+    {"id": "front_door", "type": "door_lock", "room": "hall", "name": "входная дверь", "frequency": 15,
+     "aliases": []},
+    {"id": "main_valve", "type": "valve", "room": "bathroom", "name": "главный кран", "frequency": 4,
+     "aliases": ["главный кран"]},
+    {"id": "home_alarm", "type": "alarm", "room": "hall", "name": "сигнализация", "frequency": 10,
+     "aliases": []},
+    {"id": "vacuum", "type": "vacuum", "room": "hall", "name": "робот-пылесос", "frequency": 12,
+     "aliases": []},
+    {"id": "lab_arm", "type": "arm", "room": "lab", "name": "манипулятор", "frequency": 30,
+     "sim": {"latency_ms": 1200, "failure_rate": 0.02}, "aliases": []}
+  ],
+  "object_types": [
+    {"id": "cup", "aliases": ["чашка", "чашку", "чашки", "кружка", "кружку", "кружки"]},
+    {"id": "cube", "aliases": ["кубик", "кубики", "куб", "кубика", "брусок"]},
+    {"id": "ball", "aliases": ["мяч", "мячик", "мяча", "мячика", "шарик"]},
+    {"id": "bottle", "aliases": ["бутылка", "бутылку", "бутылки"]}
+  ],
+  "attributes": {
+    "color": {
+      "red": ["красный", "красная", "красную", "красное", "красного"],
+      "blue": ["синий", "синяя", "синюю", "синее", "синего", "голубой", "голубую"],
+      "green": ["зеленый", "зеленая", "зеленую", "зеленое", "зеленого"],
+      "yellow": ["желтый", "желтая", "желтую", "желтое", "желтого"]
+    },
+    "position": {
+      "left": ["левый", "левая", "левую", "левое", "слева"],
+      "right": ["правый", "правая", "правую", "правое", "справа"],
+      "center": ["центральный", "центральную", "посередине", "в центре"]
+    },
+    "size": {
+      "big": ["большой", "большая", "большую", "большое"],
+      "small": ["маленький", "маленькая", "маленькую", "маленькое"]
+    }
+  },
+  "scene": [
+    {"id": "cup_red", "type": "cup", "attrs": {"color": "red", "position": "left", "size": "small"}, "confidence": 0.94},
+    {"id": "cup_blue", "type": "cup", "attrs": {"color": "blue", "position": "right", "size": "big"}, "confidence": 0.91},
+    {"id": "cube_green", "type": "cube", "attrs": {"color": "green", "position": "center", "size": "small"}, "confidence": 0.88},
+    {"id": "ball_yellow", "type": "ball", "attrs": {"color": "yellow", "position": "right", "size": "small"}, "confidence": 0.42}
+  ],
+  "scenarios": [
+    {"id": "leave_home", "title": "Ухожу из дома",
+     "aliases": ["я ухожу", "ухожу из дома", "режим ухода", "никого нет дома", "уходим"],
+     "steps": [
+       {"action": "turn_off", "target": {"type": "light"}},
+       {"action": "turn_off", "target": {"type": "tv"}},
+       {"action": "turn_off", "target": {"type": "ac"}},
+       {"action": "turn_off", "target": {"type": "oven"}},
+       {"action": "close", "target": {"device": "front_door"}},
+       {"action": "turn_on", "target": {"device": "home_alarm"}},
+       {"action": "start", "target": {"device": "vacuum"}, "critical": false}
+     ]},
+    {"id": "come_home", "title": "Я дома",
+     "aliases": ["я дома", "я пришел", "я вернулся", "я вернулась", "режим дома"],
+     "steps": [
+       {"action": "turn_off", "target": {"device": "home_alarm"}},
+       {"action": "turn_on", "target": {"device": "hall_light"}},
+       {"action": "dock", "target": {"device": "vacuum"}, "critical": false}
+     ]},
+    {"id": "good_night", "title": "Спокойной ночи",
+     "aliases": ["спокойной ночи", "режим сна", "я спать", "иду спать"],
+     "steps": [
+       {"action": "turn_off", "target": {"type": "light"}},
+       {"action": "turn_off", "target": {"type": "tv"}},
+       {"action": "close", "target": {"type": "curtains"}},
+       {"action": "close", "target": {"device": "front_door"}},
+       {"action": "turn_on", "target": {"device": "bedside_lamp"}, "critical": false},
+       {"action": "set_brightness", "target": {"device": "bedside_lamp"}, "value": 15, "critical": false}
+     ]},
+    {"id": "movie", "title": "Режим кино", "ordered": true,
+     "aliases": ["режим кино", "смотрим кино", "кинотеатр", "включи кино"],
+     "steps": [
+       {"action": "close", "target": {"device": "living_curtains"}},
+       {"action": "turn_off", "target": {"device": "living_chandelier"}},
+       {"action": "set_brightness", "target": {"device": "living_floor_lamp"}, "value": 20, "critical": false},
+       {"action": "turn_on", "target": {"device": "living_tv"}}
+     ]},
+    {"id": "morning", "title": "Доброе утро",
+     "aliases": ["доброе утро", "утренний режим", "я проснулся", "я проснулась"],
+     "steps": [
+       {"action": "open", "target": {"type": "curtains"}},
+       {"action": "turn_on", "target": {"device": "kitchen_light"}},
+       {"action": "turn_on", "target": {"device": "kitchen_kettle"}}
+     ]}
+  ]
+}

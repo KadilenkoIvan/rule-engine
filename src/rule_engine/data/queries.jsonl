@@ -1,0 +1,151 @@
+# Размеченные запросы. expect — допустимые статусы через «|»; action/targets/objects/scenario/value — эталон.
+# room — комната-контекст (где стоит колонка). Категории см. в README.
+{"q": "включи свет на кухне", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["kitchen_light"]}
+{"q": "выключи свет на кухне", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["kitchen_light"]}
+{"q": "включи люстру", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["living_chandelier"]}
+{"q": "выключи торшер", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["living_floor_lamp"]}
+{"q": "включи ночник", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["bedside_lamp"]}
+{"q": "включи свет в спальне", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["bedroom_light", "bedside_lamp"]}
+{"q": "включи свет в гостиной", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["living_chandelier", "living_floor_lamp"]}
+{"q": "выключи свет в прихожей", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["hall_light"]}
+{"q": "включи свет в ванной", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["bathroom_light"]}
+{"q": "включи телевизор", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["living_tv"]}
+{"q": "выключи телевизор", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["living_tv"]}
+{"q": "открой шторы в спальне", "cat": "exact", "expect": "OK", "action": "open", "targets": ["bedroom_curtains"]}
+{"q": "закрой шторы в гостиной", "cat": "exact", "expect": "OK", "action": "close", "targets": ["living_curtains"]}
+{"q": "включи кондиционер в спальне", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["bedroom_ac"]}
+{"q": "выключи кондиционер в гостиной", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["living_ac"]}
+{"q": "включи чайник", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["kitchen_kettle"]}
+{"q": "выключи духовку", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["kitchen_oven"]}
+{"q": "закрой входную дверь", "cat": "exact", "expect": "OK", "action": "close", "targets": ["front_door"]}
+{"q": "запусти пылесос", "cat": "exact", "expect": "OK", "action": "start", "targets": ["vacuum"]}
+{"q": "останови пылесос", "cat": "exact", "expect": "OK", "action": "stop", "targets": ["vacuum"]}
+{"q": "включи теплый пол", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["bathroom_floor"]}
+{"q": "выключи розетку в детской", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["kids_socket"]}
+{"q": "включи свет в детской", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["kids_light"]}
+{"q": "включи манипулятор", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["lab_arm"]}
+{"q": "возьми красную чашку", "cat": "object", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["cup_red"]}
+{"q": "возьми зеленый кубик", "cat": "object", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["cube_green"]}
+{"q": "включи сигнализацию", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["home_alarm"]}
+{"q": "выключи свет в лаборатории", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["lab_light"]}
+{"q": "включи свет в коридоре", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["hall_light"]}
+{"q": "выключи свет в спальне пожалуйста", "cat": "exact", "expect": "OK", "action": "turn_off", "targets": ["bedroom_light", "bedside_lamp"]}
+{"q": "алиса включи пожалуйста телевизор", "cat": "exact", "expect": "OK", "action": "turn_on", "targets": ["living_tv"]}
+{"q": "вруби телек", "cat": "synonym", "expect": "OK", "action": "turn_on", "targets": ["living_tv"]}
+{"q": "погаси свет на кухне", "cat": "synonym", "expect": "OK", "action": "turn_off", "targets": ["kitchen_light"]}
+{"q": "зажги ночник", "cat": "synonym", "expect": "OK", "action": "turn_on", "targets": ["bedside_lamp"]}
+{"q": "выруби кондей в спальне", "cat": "synonym", "expect": "OK", "action": "turn_off", "targets": ["bedroom_ac"]}
+{"q": "отключи телик", "cat": "synonym", "expect": "OK", "action": "turn_off", "targets": ["living_tv"]}
+{"q": "раздвинь занавески в спальне", "cat": "synonym", "expect": "OK", "action": "open", "targets": ["bedroom_curtains"]}
+{"q": "задвинь жалюзи в гостиной", "cat": "synonym", "expect": "OK", "action": "close", "targets": ["living_curtains"]}
+{"q": "поставь на охрану", "cat": "synonym", "expect": "OK", "action": "turn_on", "targets": ["home_alarm"]}
+{"q": "пропылесось", "cat": "synonym", "expect": "OK", "action": "start", "targets": ["vacuum"]}
+{"q": "вскипяти чайник", "cat": "synonym", "expect": "OK", "action": "turn_on", "targets": ["kitchen_kettle"]}
+{"q": "перекрой воду", "cat": "synonym", "expect": "OK", "action": "close", "targets": ["main_valve"]}
+{"q": "отправь пылесос на базу", "cat": "synonym", "expect": "OK", "action": "dock", "targets": ["vacuum"]}
+{"q": "схвати синюю кружку", "cat": "object", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["cup_blue"]}
+{"q": "подбери кубик", "cat": "object", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["cube_green"]}
+{"q": "отпусти", "cat": "synonym", "expect": "OK", "action": "release", "targets": ["lab_arm"]}
+{"q": "запри дверь", "cat": "synonym", "expect": "OK", "action": "close", "targets": ["front_door"]}
+{"q": "сплит в гостиной выключи", "cat": "synonym", "expect": "OK", "action": "turn_off", "targets": ["living_ac"]}
+{"q": "включи кондей в зале", "cat": "synonym", "expect": "OK", "action": "turn_on", "targets": ["living_ac"]}
+{"q": "открой шторы в зале", "cat": "synonym", "expect": "OK", "action": "open", "targets": ["living_curtains"]}
+{"q": "потуши свет в ванной", "cat": "synonym", "expect": "CLARIFY", "action": "turn_off", "targets": ["bathroom_light"], "note": "глагола нет в словаре — уточнение, а не догадка"}
+{"q": "вкл телевизор", "cat": "partial", "expect": "OK", "action": "turn_on", "targets": ["living_tv"]}
+{"q": "выкл свет на кухне", "cat": "partial", "expect": "OK", "action": "turn_off", "targets": ["kitchen_light"]}
+{"q": "включи конди в спальне", "cat": "partial", "expect": "OK", "action": "turn_on", "targets": ["bedroom_ac"]}
+{"q": "включи тел", "cat": "partial", "expect": "OK", "action": "turn_on", "targets": ["living_tv"]}
+{"q": "открой што в спальне", "cat": "partial", "expect": "OK", "action": "open", "targets": ["bedroom_curtains"]}
+{"q": "выключи люст", "cat": "partial", "expect": "OK", "action": "turn_off", "targets": ["living_chandelier"]}
+{"q": "запусти пылес", "cat": "partial", "expect": "OK", "action": "start", "targets": ["vacuum"]}
+{"q": "включи ноч", "cat": "partial", "expect": "OK", "action": "turn_on", "targets": ["bedside_lamp"]}
+{"q": "откр шторы в гостиной", "cat": "partial", "expect": "OK", "action": "open", "targets": ["living_curtains"]}
+{"q": "вкл свет в детской", "cat": "partial", "expect": "OK", "action": "turn_on", "targets": ["kids_light"]}
+{"q": "выкл телик", "cat": "partial", "expect": "OK", "action": "turn_off", "targets": ["living_tv"]}
+{"q": "включи свт на кухне", "cat": "typo", "expect": "CLARIFY", "action": "turn_on", "targets": ["kitchen_light"], "note": "короткое слово с опечаткой не исправляем"}
+{"q": "выключи телевизр", "cat": "typo", "expect": "OK", "action": "turn_off", "targets": ["living_tv"]}
+{"q": "включи кондиционр в спальне", "cat": "typo", "expect": "OK", "action": "turn_on", "targets": ["bedroom_ac"]}
+{"q": "закрой штроы в спальне", "cat": "typo", "expect": "OK", "action": "close", "targets": ["bedroom_curtains"]}
+{"q": "выкючи свет в ванной", "cat": "typo", "expect": "OK", "action": "turn_off", "targets": ["bathroom_light"]}
+{"q": "вкючи свет в ванной", "cat": "typo", "expect": "OK", "action": "turn_on", "targets": ["bathroom_light"]}
+{"q": "ыключи свет в ванной", "cat": "typo", "expect": "CLARIFY", "action": "turn_off", "targets": ["bathroom_light"], "note": "одинаково близко к включи и выключи"}
+{"q": "включи чайнк", "cat": "typo", "expect": "OK", "action": "turn_on", "targets": ["kitchen_kettle"]}
+{"q": "запусти пылесрс", "cat": "typo", "expect": "OK", "action": "start", "targets": ["vacuum"]}
+{"q": "возьми красую чашку", "cat": "typo", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["cup_red"]}
+{"q": "включи торщер", "cat": "typo", "expect": "OK", "action": "turn_on", "targets": ["living_floor_lamp"]}
+{"q": "включи свет в гостинной", "cat": "typo", "expect": "OK", "action": "turn_on", "targets": ["living_chandelier", "living_floor_lamp"]}
+{"q": "вылючи кондиционер в гостиной", "cat": "typo", "expect": "CLARIFY", "action": "turn_off", "targets": ["living_ac"], "note": "равноудалено от включи и выключи"}
+{"q": "открой двкрь", "cat": "typo", "expect": "CONFIRM|CLARIFY", "action": "open", "targets": ["front_door"], "note": "опасно + опечатка"}
+{"q": "выключи сигнализаию", "cat": "typo", "expect": "CONFIRM|CLARIFY", "action": "turn_off", "targets": ["home_alarm"]}
+{"q": "включи духовеу", "cat": "typo", "expect": "CONFIRM|CLARIFY", "action": "turn_on", "targets": ["kitchen_oven"]}
+{"q": "отрой дверь", "cat": "typo", "expect": "CONFIRM|CLARIFY", "action": "open", "targets": ["front_door"]}
+{"q": "зкрой дверь", "cat": "typo", "expect": "OK", "action": "close", "targets": ["front_door"]}
+{"q": "dsrk.xb ntktdbpjh", "cat": "layout", "expect": "OK", "action": "turn_off", "targets": ["living_tv"]}
+{"q": "drk.xb cdtn d dfyyjq", "cat": "layout", "expect": "OK", "action": "turn_on", "targets": ["bathroom_light"]}
+{"q": "jnrhjq infhs d cgfkmyt", "cat": "layout", "expect": "OK", "action": "open", "targets": ["bedroom_curtains"]}
+{"q": "включи свет", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "включи кондиционер", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "открой", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "выключи", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "возьми чашку", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "закрой шторы", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "включи розетку", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "кондиционер в спальне", "cat": "ambiguous", "expect": "CLARIFY", "action": "turn_on", "targets": ["bedroom_ac"]}
+{"q": "свет на кухне", "cat": "ambiguous", "expect": "CLARIFY", "action": "turn_on", "targets": ["kitchen_light"]}
+{"q": "поставь температуру 22", "cat": "ambiguous", "expect": "CLARIFY"}
+{"q": "включи свет", "cat": "context", "expect": "OK", "action": "turn_on", "targets": ["kitchen_light"], "room": "kitchen"}
+{"q": "выключи свет", "cat": "context", "expect": "OK", "action": "turn_off", "targets": ["bedroom_light", "bedside_lamp"], "room": "bedroom"}
+{"q": "включи кондиционер", "cat": "context", "expect": "OK", "action": "turn_on", "targets": ["living_ac"], "room": "living"}
+{"q": "закрой шторы", "cat": "context", "expect": "OK", "action": "close", "targets": ["bedroom_curtains"], "room": "bedroom"}
+{"q": "включи свет на кухне", "cat": "context", "expect": "OK", "action": "turn_on", "targets": ["kitchen_light"], "room": "bedroom"}
+{"q": "открой дверь", "cat": "dangerous", "expect": "CONFIRM", "action": "open", "targets": ["front_door"]}
+{"q": "открой входную дверь", "cat": "dangerous", "expect": "CONFIRM", "action": "open", "targets": ["front_door"]}
+{"q": "отопри замок", "cat": "dangerous", "expect": "CONFIRM", "action": "open", "targets": ["front_door"]}
+{"q": "сними с охраны", "cat": "dangerous", "expect": "CONFIRM", "action": "turn_off", "targets": ["home_alarm"]}
+{"q": "выключи сигнализацию", "cat": "dangerous", "expect": "CONFIRM", "action": "turn_off", "targets": ["home_alarm"]}
+{"q": "включи духовку", "cat": "dangerous", "expect": "CONFIRM", "action": "turn_on", "targets": ["kitchen_oven"]}
+{"q": "включи плиту", "cat": "dangerous", "expect": "CONFIRM", "action": "turn_on", "targets": ["kitchen_oven"]}
+{"q": "отключи охрану", "cat": "dangerous", "expect": "CONFIRM", "action": "turn_off", "targets": ["home_alarm"]}
+{"q": "поставь температуру 22 в спальне", "cat": "value", "expect": "OK", "action": "set_temperature", "targets": ["bedroom_ac"], "value": 22}
+{"q": "температура в гостиной двадцать пять", "cat": "value", "expect": "OK", "action": "set_temperature", "targets": ["living_ac"], "value": 25}
+{"q": "яркость торшера 30", "cat": "value", "expect": "OK", "action": "set_brightness", "targets": ["living_floor_lamp"], "value": 30}
+{"q": "громкость телевизора 15", "cat": "value", "expect": "OK", "action": "set_volume", "targets": ["living_tv"], "value": 15}
+{"q": "установи яркость ночника на пятьдесят", "cat": "value", "expect": "OK", "action": "set_brightness", "targets": ["bedside_lamp"], "value": 50}
+{"q": "теплый пол 30 градусов", "cat": "value", "expect": "OK", "action": "set_temperature", "targets": ["bathroom_floor"], "value": 30}
+{"q": "нагрей духовку до 200", "cat": "value", "expect": "OK", "action": "set_temperature", "targets": ["kitchen_oven"], "value": 200}
+{"q": "сделай громкость 30", "cat": "value", "expect": "OK", "action": "set_volume", "targets": ["living_tv"], "value": 30}
+{"q": "яркость торшера", "cat": "value", "expect": "CLARIFY", "action": "set_brightness", "targets": ["living_floor_lamp"], "note": "нет значения"}
+{"q": "поставь температуру 50 в спальне", "cat": "range", "expect": "REJECT"}
+{"q": "яркость люстры 300", "cat": "range", "expect": "REJECT"}
+{"q": "открой телевизор", "cat": "incompatible", "expect": "REJECT|CLARIFY"}
+{"q": "запусти чайник", "cat": "incompatible", "expect": "REJECT|CLARIFY"}
+{"q": "возьми телевизор", "cat": "incompatible", "expect": "REJECT|CLARIFY|NOT_FOUND"}
+{"q": "не включай свет", "cat": "negation", "expect": "REJECT"}
+{"q": "не открывай дверь", "cat": "negation", "expect": "REJECT"}
+{"q": "никогда не выключай холодильник", "cat": "negation", "expect": "REJECT"}
+{"q": "свет на кухне не включай", "cat": "negation", "expect": "REJECT"}
+{"q": "какая погода завтра", "cat": "ood", "expect": "NOT_FOUND"}
+{"q": "расскажи анекдот", "cat": "ood", "expect": "NOT_FOUND"}
+{"q": "сколько времени", "cat": "ood", "expect": "NOT_FOUND"}
+{"q": "позвони маме", "cat": "ood", "expect": "NOT_FOUND"}
+{"q": "закажи пиццу", "cat": "ood", "expect": "NOT_FOUND"}
+{"q": "включи музыку", "cat": "ood", "expect": "CLARIFY|NOT_FOUND"}
+{"q": "открой окно", "cat": "ood", "expect": "CLARIFY|NOT_FOUND"}
+{"q": "я ухожу", "cat": "scenario", "expect": "OK", "scenario": "leave_home"}
+{"q": "спокойной ночи", "cat": "scenario", "expect": "OK", "scenario": "good_night"}
+{"q": "режим кино", "cat": "scenario", "expect": "OK", "scenario": "movie"}
+{"q": "доброе утро", "cat": "scenario", "expect": "OK", "scenario": "morning"}
+{"q": "уходим", "cat": "scenario", "expect": "OK", "scenario": "leave_home"}
+{"q": "я дома", "cat": "scenario", "expect": "CONFIRM", "scenario": "come_home", "note": "снимает охрану — опасно"}
+{"q": "я пришел домой", "cat": "scenario", "expect": "CONFIRM", "scenario": "come_home"}
+{"q": "выключи свет на кухне и включи телевизор", "cat": "multi", "expect": "OK"}
+{"q": "выключи телевизор и кондиционер в гостиной", "cat": "multi", "expect": "OK", "action": "turn_off", "targets": ["living_tv", "living_ac"]}
+{"q": "закрой шторы в гостиной и выключи люстру", "cat": "multi", "expect": "OK"}
+{"q": "включи свет на кухне и в прихожей", "cat": "multi", "expect": "OK", "action": "turn_on", "targets": ["kitchen_light", "hall_light"]}
+{"q": "выключи весь свет", "cat": "multi", "expect": "OK", "action": "turn_off", "targets": ["kitchen_light", "living_chandelier", "living_floor_lamp", "bedroom_light", "bedside_lamp", "hall_light", "bathroom_light", "kids_light", "lab_light"]}
+{"q": "закрой все шторы", "cat": "multi", "expect": "OK", "action": "close", "targets": ["living_curtains", "bedroom_curtains"]}
+{"q": "возьми левую чашку", "cat": "object", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["cup_red"]}
+{"q": "возьми мяч", "cat": "object", "expect": "OK", "action": "grasp", "targets": ["lab_arm"], "objects": ["ball_yellow"]}
+{"q": "возьми бутылку", "cat": "object", "expect": "NOT_FOUND"}
+{"q": "возьми фиолетовую чашку", "cat": "object", "expect": "CLARIFY|NOT_FOUND"}
+{"q": "положи кубик", "cat": "object", "expect": "OK", "action": "release", "targets": ["lab_arm"]}
