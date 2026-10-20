@@ -1,0 +1,51 @@
+"""Командная строка: показать граф сценариев и прогнать поток токенов."""
+
+import argparse
+from collections.abc import Iterable, Iterator
+from pathlib import Path
+
+from rule_engine.engine import Engine, Event, Match
+from rule_engine.graph import build_graph, render
+from rule_engine.rules import load_rules
+
+
+def parse_stream(lines: Iterable[str]) -> Iterator[Event]:
+    """Строка потока: «токен уверенность». Пустые строки и строки с # пропускаются."""
+    for number, line in enumerate(lines, start=1):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        parts = text.split()
+        if len(parts) != 2:
+            raise ValueError(f"строка {number}: ожидается «токен уверенность», получено {text!r}")
+        token, score = parts
+        yield Event(token, float(score))
+
+
+def format_match(match: Match) -> str:
+    steps = " ".join(f"{step.event.token}#{step.position}" for step in match.steps)
+    return f"{match.scenario}  ←  {steps}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="rule-engine")
+    commands = parser.add_subparsers(dest="command", required=True)
+    graph_command = commands.add_parser("graph", help="показать граф, построенный из сценариев")
+    graph_command.add_argument("rules", type=Path)
+    run_command = commands.add_parser("run", help="прогнать поток и вывести сработавшие сценарии")
+    run_command.add_argument("rules", type=Path)
+    run_command.add_argument("stream", type=Path)
+    args = parser.parse_args(argv)
+
+    rules = load_rules(args.rules)
+    if args.command == "graph":
+        print(render(build_graph(rules)))
+        return 0
+
+    engine = Engine(rules)
+    with args.stream.open(encoding="utf-8") as lines:
+        for event in parse_stream(lines):
+            for match in engine.push(event):
+                print(format_match(match))
+    print(f"активных частичных совпадений в конце потока: {engine.active_count}")
+    return 0
