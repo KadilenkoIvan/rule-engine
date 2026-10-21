@@ -1,5 +1,6 @@
 """Проход потока токенов по графу сценариев."""
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -12,10 +13,13 @@ from rule_engine.rules import RuleSet
 class Event:
     token: str
     score: float  # уверенность детектора; в сопоставлении пока не участвует
+    time: float  # секунды: когда токен сказан, по одной шкале для всего потока (ставит детектор)
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.score <= 1.0:
             raise ValueError(f"уверенность {self.score} токена {self.token!r} вне [0, 1]")
+        if not math.isfinite(self.time):
+            raise ValueError(f"время {self.time} токена {self.token!r} не конечное число")
 
 
 class Step(NamedTuple):
@@ -38,13 +42,18 @@ class Engine:
       Поэтому активных совпадений не больше, чем вершин в графе.
     - Сценарий срабатывает при входе в его конечную вершину. Если из неё есть продолжения
       (более длинные сценарии с тем же началом), совпадение остаётся активным.
+    - Пауза между соседними токенами больше `max_gap` начинает новую последовательность:
+      все частичные совпадения снимаются, токен ищет сценарий с начала.
+    - Время событий не убывает: событие раньше предыдущего — ошибка.
     """
 
     def __init__(self, rules: RuleSet) -> None:
         self._vocabulary = rules.vocabulary
+        self._max_gap = rules.max_gap
         self._root = build_graph(rules)
         self._active: dict[Node, tuple[Step, ...]] = {}
         self._position = 0
+        self._last_time: float | None = None  # None, пока не пришло ни одного события
 
     @property
     def active_count(self) -> int:
@@ -59,6 +68,14 @@ class Engine:
     def push(self, event: Event) -> list[Match]:
         if event.token not in self._vocabulary:
             raise ValueError(f"токена {event.token!r} нет в словаре")
+        if self._last_time is not None:
+            if event.time < self._last_time:
+                raise ValueError(
+                    f"время {event.time} токена {event.token!r} раньше предыдущего {self._last_time}"
+                )
+            if event.time - self._last_time > self._max_gap:
+                self._active = {}
+        self._last_time = event.time
         step = Step(self._position, event)
         self._position += 1
 

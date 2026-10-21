@@ -10,20 +10,22 @@ from rule_engine.rules import load_rules
 
 
 def parse_stream(lines: Iterable[str]) -> Iterator[Event]:
-    """Строка потока: «токен уверенность». Пустые строки и строки с # пропускаются."""
+    """Строка потока: «токен уверенность время». Пустые строки и строки с # пропускаются."""
     for number, line in enumerate(lines, start=1):
         text = line.strip()
         if not text or text.startswith("#"):
             continue
         parts = text.split()
-        if len(parts) != 2:
-            raise ValueError(f"строка {number}: ожидается «токен уверенность», получено {text!r}")
-        token, score = parts
-        yield Event(token, float(score))
+        if len(parts) != 3:
+            raise ValueError(
+                f"строка {number}: ожидается «токен уверенность время», получено {text!r}"
+            )
+        token, score, time = parts
+        yield Event(token, float(score), float(time))
 
 
 def format_match(match: Match) -> str:
-    steps = " ".join(f"{step.event.token}#{step.position}" for step in match.steps)
+    steps = " ".join(f"{step.event.token}#{step.position}@{step.event.time}" for step in match.steps)
     return f"{match.scenario}  ←  {steps}"
 
 
