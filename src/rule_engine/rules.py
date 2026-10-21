@@ -10,6 +10,7 @@ from pathlib import Path
 class Scenario:
     name: str
     patterns: tuple[tuple[str, ...], ...]  # альтернативы: сработал любой шаблон — сработал сценарий
+    cooldown: float  # секунды: столько сценарий молчит после выданного срабатывания
 
 
 @dataclass(frozen=True)
@@ -38,12 +39,24 @@ class RuleSet:
                 unknown = [token for token in pattern if token not in self.vocabulary]
                 if unknown:
                     raise ValueError(f"сценарий {scenario.name!r}: токенов {unknown} нет в словаре")
+            if not (math.isfinite(scenario.cooldown) and scenario.cooldown >= 0):
+                raise ValueError(
+                    f"сценарий {scenario.name!r}: cooldown {scenario.cooldown} должен быть "
+                    "неотрицательным конечным числом"
+                )
 
     @classmethod
     def from_dict(cls, data: dict) -> "RuleSet":
-        """Шаблон — список токенов, а не строка через пробел: в токене бывают пробелы."""
+        """Шаблон — список токенов, а не строка через пробел: в токене бывают пробелы.
+
+        `cooldown` сценария необязателен, по умолчанию 0.
+        """
         scenarios = tuple(
-            Scenario(item["name"], tuple(tuple(pattern) for pattern in item["patterns"]))
+            Scenario(
+                item["name"],
+                tuple(tuple(pattern) for pattern in item["patterns"]),
+                float(item.get("cooldown", 0.0)),
+            )
             for item in data["scenarios"]
         )
         return cls(frozenset(data["vocabulary"]), scenarios, float(data["max_gap"]))
