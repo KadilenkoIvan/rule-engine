@@ -42,6 +42,10 @@ class Engine:
     """Частичные совпадения хранятся между вызовами, поэтому поток можно подавать порциями.
 
     - Токен, не продолжающий частичное совпадение, пропускается: совпадение ждёт дальше.
+    - У ребра есть задержка: совпадение продолжается по нему, только если от последнего шага
+      совпадения прошло не больше неё. Посторонние токены этот срок не продлевают. Когда сроки
+      всех рёбер из вершины истекли, совпадение снимается. Новое совпадение от корня задержку
+      не проверяет.
     - Совпадение, продолжившееся по ребру, остаётся и в старой вершине: копия ждёт другого
       продолжения. Поэтому лишний токен со своим ребром не уводит совпадение в чужую ветку.
     - В вершине живёт не больше одного совпадения; из двух остаётся начавшееся позже, а при
@@ -54,16 +58,13 @@ class Engine:
       сценария (токены сравниваются по позиции в потоке) или если с выданного срабатывания
       этого сценария прошло меньше его `cooldown`. Невыданное срабатывание не занимает токены
       и не продлевает cooldown, а совпадение живёт дальше.
-    - Пауза между соседними токенами больше `max_gap` начинает новую последовательность:
-      все частичные совпадения снимаются, токен ищет сценарий с начала.
     - Время событий не убывает: событие раньше предыдущего — ошибка.
     """
 
     def __init__(self, rules: RuleSet) -> None:
         self._vocabulary = rules.vocabulary
-        self._max_gap = rules.max_gap
         self._cooldowns = {scenario.name: scenario.cooldown for scenario in rules.scenarios}
-        self._root = build_graph(rules)
+        self._starts = build_graph(rules)
         self._active: dict[Node, tuple[Step, ...]] = {}
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
@@ -83,13 +84,10 @@ class Engine:
     def push(self, event: Event) -> list[Match]:
         if event.token not in self._vocabulary:
             raise ValueError(f"токена {event.token!r} нет в словаре")
-        if self._last_time is not None:
-            if event.time < self._last_time:
-                raise ValueError(
-                    f"время {event.time} токена {event.token!r} раньше предыдущего {self._last_time}"
-                )
-            if event.time - self._last_time > self._max_gap:
-                self._active = {}
+        if self._last_time is not None and event.time < self._last_time:
+            raise ValueError(
+                f"время {event.time} токена {event.token!r} раньше предыдущего {self._last_time}"
+            )
         self._last_time = event.time
         step = Step(self._position, event)
         self._position += 1
@@ -121,13 +119,17 @@ class Engine:
                 keep(node, path)
 
         for node, path in self._active.items():
+            # срок считается от последнего шага совпадения, а не от последнего токена потока
+            elapsed = event.time - path[-1].event.time
+            if all(elapsed > edge.max_gap for edge in node.children):
+                continue  # сроки всех рёбер из вершины истекли: совпадение снято
             keep(node, path)  # копия остаётся в вершине и ждёт другого продолжения
-            child = node.children.get(event.token)
-            if child is not None:
-                enter(child, path + (step,))
-        start = self._root.children.get(event.token)
+            for edge, child in node.children.items():
+                if edge.token == event.token and elapsed <= edge.max_gap:
+                    enter(child, path + (step,))
+        start = self._starts.get(event.token)
         if start is not None:
-            enter(start, (step,))
+            enter(start, (step,))  # новое совпадение задержку не проверяет
 
         self._active = active
         # новые срабатывания состоят из позиций не раньше начала самого старого активного

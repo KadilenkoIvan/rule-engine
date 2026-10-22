@@ -5,38 +5,72 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+# допустимые ключи JSON на каждом уровне: другой ключ — ошибка, чтобы опечатка не терялась молча
+RULES_KEYS = frozenset({"max_gap", "vocabulary", "scenarios"})
+SCENARIO_KEYS = frozenset({"name", "patterns", "cooldown", "max_gap"})
+STEP_KEYS = frozenset({"token", "max_gap"})
+
+
+@dataclass(frozen=True)
+class PatternStep:
+    """Шаг шаблона. Не путать со `Step` из engine.py: тот — событие потока внутри совпадения."""
+
+    token: str
+    max_gap: float | None  # секунды от предыдущего шага; None — задержка сценария или корня
+
 
 @dataclass(frozen=True)
 class Scenario:
     name: str
-    patterns: tuple[tuple[str, ...], ...]  # альтернативы: сработал любой шаблон — сработал сценарий
+    patterns: tuple[tuple[PatternStep, ...], ...]  # альтернативы: сработал любой шаблон — сработал сценарий
     cooldown: float  # секунды: столько сценарий молчит после выданного срабатывания
+    max_gap: float | None  # секунды между шагами, у которых задержка не задана; None — из корня
 
 
 @dataclass(frozen=True)
 class RuleSet:
     vocabulary: frozenset[str]
     scenarios: tuple[Scenario, ...]
-    max_gap: float  # секунды: при паузе дольше начинается новая последовательность команд
+    max_gap: float  # секунды между шагами, если задержку не задали ни шаг, ни сценарий
 
     def __post_init__(self) -> None:
-        if not (math.isfinite(self.max_gap) and self.max_gap > 0):
+        if not positive_finite(self.max_gap):
             raise ValueError(f"max_gap {self.max_gap} должен быть положительным конечным числом")
         names: set[str] = set()
         for scenario in self.scenarios:
             if scenario.name in names:
                 raise ValueError(f"сценарий {scenario.name!r} объявлен дважды")
             names.add(scenario.name)
+            if scenario.max_gap is not None and not positive_finite(scenario.max_gap):
+                raise ValueError(
+                    f"сценарий {scenario.name!r}: max_gap {scenario.max_gap} должен быть "
+                    "положительным конечным числом"
+                )
             if not scenario.patterns:
                 raise ValueError(f"сценарий {scenario.name!r} не содержит шаблонов")
-            patterns: set[tuple[str, ...]] = set()
+            patterns: set[tuple[tuple[str, float], ...]] = set()
             for pattern in scenario.patterns:
                 if not pattern:
                     raise ValueError(f"сценарий {scenario.name!r} содержит пустой шаблон")
-                if pattern in patterns:
-                    raise ValueError(f"сценарий {scenario.name!r}: шаблон {list(pattern)} задан дважды")
-                patterns.add(pattern)
-                unknown = [token for token in pattern if token not in self.vocabulary]
+                tokens = [step.token for step in pattern]
+                if pattern[0].max_gap is not None:
+                    raise ValueError(
+                        f"сценарий {scenario.name!r}: max_gap у первого шага {pattern[0].token!r} "
+                        "не задаётся — новое совпадение задержку не проверяет"
+                    )
+                for step in pattern[1:]:
+                    if step.max_gap is not None and not positive_finite(step.max_gap):
+                        raise ValueError(
+                            f"сценарий {scenario.name!r}: max_gap {step.max_gap} у шага "
+                            f"{step.token!r} должен быть положительным конечным числом"
+                        )
+                # шаблоны сравниваются по токенам и действующим задержкам: шаг без max_gap и шаг с
+                # тем же max_gap, что у сценария, — один и тот же шаг
+                key = tuple((step.token, self.gap(scenario, step)) for step in pattern)
+                if key in patterns:
+                    raise ValueError(f"сценарий {scenario.name!r}: шаблон {tokens} задан дважды")
+                patterns.add(key)
+                unknown = [token for token in tokens if token not in self.vocabulary]
                 if unknown:
                     raise ValueError(f"сценарий {scenario.name!r}: токенов {unknown} нет в словаре")
             if not (math.isfinite(scenario.cooldown) and scenario.cooldown >= 0):
@@ -45,21 +79,54 @@ class RuleSet:
                     "неотрицательным конечным числом"
                 )
 
+    def gap(self, scenario: Scenario, step: PatternStep) -> float:
+        """Задержка шага: своя; если не задана — сценария; если нет и там — из корня."""
+        if step.max_gap is not None:
+            return step.max_gap
+        if scenario.max_gap is not None:
+            return scenario.max_gap
+        return self.max_gap
+
     @classmethod
     def from_dict(cls, data: dict) -> "RuleSet":
-        """Шаблон — список токенов, а не строка через пробел: в токене бывают пробелы.
+        """Шаблон — список шагов, а не строка через пробел: в токене бывают пробелы.
 
-        `cooldown` сценария необязателен, по умолчанию 0.
+        Шаг — строка с токеном или объект `{"token": ..., "max_gap": ...}`. `max_gap` у шага и у
+        сценария необязателен, `cooldown` сценария — тоже, по умолчанию 0. Неизвестный ключ на
+        любом уровне — ошибка.
         """
-        scenarios = tuple(
-            Scenario(
-                item["name"],
-                tuple(tuple(pattern) for pattern in item["patterns"]),
-                float(item.get("cooldown", 0.0)),
-            )
-            for item in data["scenarios"]
-        )
+        check_keys(data, RULES_KEYS, "корень правил")
+        scenarios = tuple(parse_scenario(item) for item in data["scenarios"])
         return cls(frozenset(data["vocabulary"]), scenarios, float(data["max_gap"]))
+
+
+def positive_finite(value: float) -> bool:
+    return math.isfinite(value) and value > 0
+
+
+def check_keys(item: dict, known: frozenset[str], where: str) -> None:
+    unknown = sorted(item.keys() - known)
+    if unknown:
+        raise ValueError(f"{where}: неизвестные ключи {unknown}")
+
+
+def parse_scenario(item: dict) -> Scenario:
+    name = item["name"]
+    check_keys(item, SCENARIO_KEYS, f"сценарий {name!r}")
+    return Scenario(
+        name,
+        tuple(tuple(parse_step(name, step) for step in pattern) for pattern in item["patterns"]),
+        float(item.get("cooldown", 0.0)),
+        float(item["max_gap"]) if "max_gap" in item else None,
+    )
+
+
+def parse_step(scenario: str, item: str | dict) -> PatternStep:
+    if isinstance(item, str):
+        return PatternStep(item, None)
+    token = item["token"]
+    check_keys(item, STEP_KEYS, f"сценарий {scenario!r}, шаг {token!r}")
+    return PatternStep(token, float(item["max_gap"]) if "max_gap" in item else None)
 
 
 def load_rules(path: Path) -> RuleSet:
