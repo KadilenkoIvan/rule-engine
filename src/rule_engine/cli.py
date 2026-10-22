@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rules = load_rules(args.rules)
     if args.command == "graph":
-        print(render(build_graph(rules), rules.max_gap))
+        print(render(build_graph(rules), rules))
         return 0
 
     engine = Engine(rules)
