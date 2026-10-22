@@ -31,11 +31,37 @@ class Step(NamedTuple):
 class Match:
     scenario: str
     steps: tuple[Step, ...]
+    confidence: float  # общая уверенность: среднее геометрическое score шагов
 
 
-def freshness(path: tuple[Step, ...]) -> tuple[int, int]:
-    """Позиции первого и последнего шага: из двух совпадений в вершине остаётся то, у кого больше."""
-    return path[0].position, path[-1].position
+class Partial(NamedTuple):
+    """Частичное совпадение: его шаги и произведение их score."""
+
+    steps: tuple[Step, ...]
+    product: float
+
+    @property
+    def confidence(self) -> float:
+        """Среднее геометрическое score шагов."""
+        return self.product ** (1 / len(self.steps))
+
+    def bound(self, length: int) -> float:
+        """Уверенность в шаблоне длины `length`, если у оставшихся шагов score 1.0: выше не бывает."""
+        return self.product ** (1 / length)
+
+    def extend(self, step: Step) -> "Partial":
+        return Partial(self.steps + (step,), self.product * step.event.score)
+
+
+def dominates(a: Partial, b: Partial) -> bool:
+    """`a` вытесняет `b` из вершины: последний шаг у `a` не раньше, а произведение не меньше.
+
+    Тогда любое продолжение `b` есть и у `a`, со сроком не раньше и уверенностью не ниже. Если
+    равны и последний шаг, и произведение, остаётся начавшееся позже.
+    """
+    if (a.steps[-1].position, a.product) == (b.steps[-1].position, b.product):
+        return a.steps[0].position >= b.steps[0].position
+    return a.steps[-1].position >= b.steps[-1].position and a.product >= b.product
 
 
 class Engine:
@@ -51,12 +77,19 @@ class Engine:
       только если score токена не ниже порога ребра из корня.
     - Совпадение, продолжившееся по ребру, остаётся и в старой вершине: копия ждёт другого
       продолжения. Поэтому лишний токен со своим ребром не уводит совпадение в чужую ветку.
-    - В вершине живёт не больше одного совпадения; из двух остаётся начавшееся позже, а при
-      равном начале — то, у которого последний шаг позже. Поэтому активных совпадений не
-      больше, чем вершин в графе.
+    - Уверенность совпадения — среднее геометрическое score его шагов. Сценарий срабатывает,
+      только если она не ниже `min_confidence` сценария.
+    - В вершине стоят только несравнимые совпадения: одно вытесняет другое, если у него
+      последний шаг не раньше, а произведение score не меньше (`dominates`). Поэтому рядом могут
+      стоять свежее совпадение и более уверенное.
+    - Совпадение не остаётся в вершине, если даже при score 1.0 у всех оставшихся шагов оно не
+      дотянет до порога ни одного сценария, чей шаблон кончается ниже (ранний отсев).
     - Сценарий срабатывает при входе в вершину, где заканчивается один из его шаблонов. Если
       из неё есть продолжения (более длинные шаблоны с тем же началом), совпадение остаётся
       активным.
+    - Если на одном событии завершились несколько совпадений одного сценария, выдаётся не
+      больше одного: последний токен у них общий. Выдаётся самое уверенное, а при равной
+      уверенности — начавшееся позже.
     - Срабатывание не выдаётся, если у него есть общий токен с выданным срабатыванием того же
       сценария (токены сравниваются по позиции в потоке) или если с выданного срабатывания
       этого сценария прошло меньше его `cooldown`. Невыданное срабатывание не занимает токены
@@ -67,8 +100,11 @@ class Engine:
     def __init__(self, rules: RuleSet) -> None:
         self._vocabulary = rules.vocabulary
         self._cooldowns = {scenario.name: scenario.cooldown for scenario in rules.scenarios}
+        self._min_confidences = {
+            scenario.name: rules.confidence_threshold(scenario) for scenario in rules.scenarios
+        }
         self._starts = build_graph(rules)
-        self._active: dict[Node, tuple[Step, ...]] = {}
+        self._active: dict[Node, list[Partial]] = {}  # вершина → несравнимые совпадения в ней
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
         self._position = 0
@@ -76,7 +112,7 @@ class Engine:
 
     @property
     def active_count(self) -> int:
-        return len(self._active)
+        return sum(len(partials) for partials in self._active.values())
 
     def feed(self, events: Iterable[Event]) -> list[Match]:
         matches: list[Match] = []
@@ -96,52 +132,69 @@ class Engine:
         self._position += 1
 
         matches: list[Match] = []
-        active: dict[Node, tuple[Step, ...]] = {}
+        active: dict[Node, list[Partial]] = {}
+        completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
 
-        def keep(node: Node, path: tuple[Step, ...]) -> None:
-            current = active.get(node)
-            if current is None or freshness(path) > freshness(current):
-                active[node] = path
+        def keep(node: Node, partial: Partial) -> None:
+            partials = active.setdefault(node, [])
+            if any(dominates(other, partial) for other in partials):
+                return
+            partials[:] = [other for other in partials if not dominates(partial, other)]
+            partials.append(partial)
 
-        def fire(scenario: str, path: tuple[Step, ...]) -> None:
-            positions = {position for position, _ in path}
+        def enter(node: Node, partial: Partial) -> None:
+            if node.scenario is not None:
+                completed.setdefault(node.scenario, []).append(partial)
+            # ранний отсев; у вершины без продолжений `ahead` пуст, и совпадение в ней не остаётся
+            if any(partial.bound(length) >= threshold for length, threshold in node.ahead):
+                keep(node, partial)
+
+        def fire(scenario: str, partials: list[Partial]) -> None:
             taken = self._taken.setdefault(scenario, set())
-            if not taken.isdisjoint(positions):
-                return  # повтор: токен уже вошёл в выданное срабатывание этого сценария
+            eligible = [
+                partial
+                for partial in partials
+                if partial.confidence >= self._min_confidences[scenario]
+                and taken.isdisjoint(position for position, _ in partial.steps)
+            ]
+            if not eligible:
+                return  # уверенность ниже порога или повтор: токен уже вошёл в выданное срабатывание
             fired_at = self._fired_at.get(scenario)
             if fired_at is not None and event.time - fired_at < self._cooldowns[scenario]:
                 return
-            taken.update(positions)
+            best = max(eligible, key=lambda partial: (partial.confidence, partial.steps[0].position))
+            taken.update(position for position, _ in best.steps)
             self._fired_at[scenario] = event.time
-            matches.append(Match(scenario, path))
+            matches.append(Match(scenario, best.steps, best.confidence))
 
-        def enter(node: Node, path: tuple[Step, ...]) -> None:
-            if node.scenario is not None:
-                fire(node.scenario, path)
-            if node.children:
-                keep(node, path)
-
-        for node, path in self._active.items():
-            # срок считается от последнего шага совпадения, а не от последнего токена потока
-            elapsed = event.time - path[-1].event.time
-            if all(elapsed > edge.max_gap for edge in node.children):
-                continue  # сроки всех рёбер из вершины истекли: совпадение снято
-            keep(node, path)  # копия остаётся в вершине и ждёт другого продолжения
-            for edge, child in node.children.items():
-                if (
-                    edge.token == event.token
-                    and elapsed <= edge.max_gap
-                    and event.score >= edge.min_score
-                ):
-                    enter(child, path + (step,))
+        for node, partials in self._active.items():
+            for partial in partials:
+                # срок считается от последнего шага совпадения, а не от последнего токена потока
+                elapsed = event.time - partial.steps[-1].event.time
+                if all(elapsed > edge.max_gap for edge in node.children):
+                    continue  # сроки всех рёбер из вершины истекли: совпадение снято
+                keep(node, partial)  # копия остаётся в вершине и ждёт другого продолжения
+                for edge, child in node.children.items():
+                    if (
+                        edge.token == event.token
+                        and elapsed <= edge.max_gap
+                        and event.score >= edge.min_score
+                    ):
+                        enter(child, partial.extend(step))
         for start, child in self._starts.items():
             if start.token == event.token and event.score >= start.min_score:
-                enter(child, (step,))  # новое совпадение задержку не проверяет
+                enter(child, Partial((step,), event.score))  # новое совпадение задержку не проверяет
+        # срабатывания выдаются после обхода: из совпадений сценария выбирается самое уверенное
+        for scenario, partials in completed.items():
+            fire(scenario, partials)
 
         self._active = active
         # новые срабатывания состоят из позиций не раньше начала самого старого активного
         # совпадения, более ранние можно забыть
-        oldest = min((path[0].position for path in active.values()), default=self._position)
+        oldest = min(
+            (partial.steps[0].position for partials in active.values() for partial in partials),
+            default=self._position,
+        )
         for taken in self._taken.values():
             taken.difference_update([position for position in taken if position < oldest])
         return matches

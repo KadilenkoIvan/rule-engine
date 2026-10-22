@@ -27,6 +27,9 @@ class Node:
     # в общей вершине пришлось бы ждать по срокам и порогам разных сценариев
     children: dict[Edge, "Node"] = field(default_factory=dict)
     scenario: str | None = None  # сценарий, один из шаблонов которого завершается в этой вершине
+    # (длина шаблона, порог общей уверенности его сценария) для шаблонов, которые кончаются ниже
+    # вершины: по ним движок снимает совпадение, которое не дотянет ни до одного порога
+    ahead: set[tuple[int, float]] = field(default_factory=set)
 
 
 def build_graph(rules: RuleSet) -> dict[Start, Node]:
@@ -43,11 +46,13 @@ def build_graph(rules: RuleSet) -> dict[Start, Node]:
             if start not in starts:
                 starts[start] = Node()
             node = starts[start]
+            nodes = [node]
             for step in rest:
                 edge = Edge(step.token, rules.gap(scenario, step), rules.threshold(scenario, step))
                 if edge not in node.children:
                     node.children[edge] = Node()
                 node = node.children[edge]
+                nodes.append(node)
             if node.scenario is not None:
                 raise ValueError(
                     f"сценарии {node.scenario!r} и {scenario.name!r} задают одну и ту же "
@@ -55,6 +60,8 @@ def build_graph(rules: RuleSet) -> dict[Start, Node]:
                     "задержками и порогами"
                 )
             node.scenario = scenario.name
+            for above in nodes[:-1]:
+                above.ahead.add((len(pattern), rules.confidence_threshold(scenario)))
     return starts
 
 
