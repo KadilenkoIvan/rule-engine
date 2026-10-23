@@ -29,8 +29,12 @@ def parse_stream(lines: Iterable[str]) -> Iterator[Event]:
 
 
 def format_match(match: Match) -> str:
-    steps = " ".join(f"{step.event.token}#{step.position}@{step.event.time}" for step in match.steps)
-    return f"{match.scenario} ({match.confidence:.2f})  ←  {steps}"
+    """`✓ взлом, уверенность 0.85 — [<дверь> 0.90, 0.0 с] [<громкий звук> 0.80, 9.0 с]`:
+    у шага — его токен, уверенность и время."""
+    steps = " ".join(
+        f"[{step.event.token} {step.event.score:.2f}, {step.event.time} с]" for step in match.steps
+    )
+    return f"✓ {match.scenario}, уверенность {match.confidence:.2f} — {steps}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,5 +57,5 @@ def main(argv: list[str] | None = None) -> int:
         for event in parse_stream(lines):
             for match in engine.push(event):
                 print(format_match(match))
-    print(f"активных частичных совпадений в конце потока: {engine.active_count}")
+    print(f"незавершённых совпадений в конце потока: {engine.active_count}")
     return 0
