@@ -10,12 +10,16 @@ from rule_engine.rules import load_rules
 
 
 def parse_stream(lines: Iterable[str]) -> Iterator[Event]:
-    """Строка потока: «токен уверенность время». Пустые строки и строки с # пропускаются."""
+    """Строка потока: «токен уверенность время». Пустые строки и строки с # пропускаются.
+
+    Токеном считается всё до двух последних полей, поэтому в нём бывают пробелы:
+    `<громкий звук> 0.62 12.4`.
+    """
     for number, line in enumerate(lines, start=1):
         text = line.strip()
         if not text or text.startswith("#"):
             continue
-        parts = text.split()
+        parts = text.rsplit(maxsplit=2)
         if len(parts) != 3:
             raise ValueError(
                 f"строка {number}: ожидается «токен уверенность время», получено {text!r}"

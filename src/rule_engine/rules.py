@@ -9,7 +9,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Scenario:
     name: str
-    tokens: tuple[str, ...]
+    patterns: tuple[tuple[str, ...], ...]  # альтернативы: сработал любой шаблон — сработал сценарий
 
 
 @dataclass(frozen=True)
@@ -26,17 +26,25 @@ class RuleSet:
             if scenario.name in names:
                 raise ValueError(f"сценарий {scenario.name!r} объявлен дважды")
             names.add(scenario.name)
-            if not scenario.tokens:
-                raise ValueError(f"сценарий {scenario.name!r} не содержит токенов")
-            unknown = [token for token in scenario.tokens if token not in self.vocabulary]
-            if unknown:
-                raise ValueError(f"сценарий {scenario.name!r}: токенов {unknown} нет в словаре")
+            if not scenario.patterns:
+                raise ValueError(f"сценарий {scenario.name!r} не содержит шаблонов")
+            patterns: set[tuple[str, ...]] = set()
+            for pattern in scenario.patterns:
+                if not pattern:
+                    raise ValueError(f"сценарий {scenario.name!r} содержит пустой шаблон")
+                if pattern in patterns:
+                    raise ValueError(f"сценарий {scenario.name!r}: шаблон {list(pattern)} задан дважды")
+                patterns.add(pattern)
+                unknown = [token for token in pattern if token not in self.vocabulary]
+                if unknown:
+                    raise ValueError(f"сценарий {scenario.name!r}: токенов {unknown} нет в словаре")
 
     @classmethod
     def from_dict(cls, data: dict) -> "RuleSet":
-        """`pattern` сценария — токены через пробел."""
+        """Шаблон — список токенов, а не строка через пробел: в токене бывают пробелы."""
         scenarios = tuple(
-            Scenario(item["name"], tuple(item["pattern"].split())) for item in data["scenarios"]
+            Scenario(item["name"], tuple(tuple(pattern) for pattern in item["patterns"]))
+            for item in data["scenarios"]
         )
         return cls(frozenset(data["vocabulary"]), scenarios, float(data["max_gap"]))
 
