@@ -1,6 +1,7 @@
 """Словарь токенов и сценарии: исходные данные, из которых строится граф."""
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,8 +16,11 @@ class Scenario:
 class RuleSet:
     vocabulary: frozenset[str]
     scenarios: tuple[Scenario, ...]
+    max_gap: float  # секунды: при паузе дольше начинается новая последовательность команд
 
     def __post_init__(self) -> None:
+        if not (math.isfinite(self.max_gap) and self.max_gap > 0):
+            raise ValueError(f"max_gap {self.max_gap} должен быть положительным конечным числом")
         names: set[str] = set()
         for scenario in self.scenarios:
             if scenario.name in names:
@@ -34,7 +38,7 @@ class RuleSet:
         scenarios = tuple(
             Scenario(item["name"], tuple(item["pattern"].split())) for item in data["scenarios"]
         )
-        return cls(frozenset(data["vocabulary"]), scenarios)
+        return cls(frozenset(data["vocabulary"]), scenarios, float(data["max_gap"]))
 
 
 def load_rules(path: Path) -> RuleSet:
