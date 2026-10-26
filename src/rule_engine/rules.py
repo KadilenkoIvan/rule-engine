@@ -8,8 +8,9 @@ from pathlib import Path
 # допустимые ключи JSON на каждом уровне: другой ключ — ошибка, чтобы опечатка не терялась молча
 RULES_KEYS = frozenset({"max_gap", "min_score", "min_confidence", "vocabulary", "scenarios"})
 SCENARIO_KEYS = frozenset(
-    {"name", "patterns", "cooldown", "max_gap", "min_score", "min_confidence"}
+    {"name", "patterns", "order", "cooldown", "max_gap", "min_score", "min_confidence"}
 )
+ORDERS = ("sequence", "any")  # шаги по порядку шаблона или в любом порядке
 STEP_KEYS = frozenset({"token", "max_gap", "min_score"})
 
 
@@ -26,6 +27,7 @@ class PatternStep:
 class Scenario:
     name: str
     patterns: tuple[tuple[PatternStep, ...], ...]  # альтернативы: сработал любой шаблон — сработал сценарий
+    order: str  # "sequence" — шаги идут по порядку шаблона, "any" — в любом порядке
     cooldown: float  # секунды: столько сценарий молчит после выданного срабатывания
     max_gap: float | None  # секунды между шагами, у которых задержка не задана; None — из корня
     min_score: float | None  # порог шагов, у которых он не задан; None — из корня
@@ -66,6 +68,11 @@ class RuleSet:
                     f"сценарий {scenario.name!r}: min_confidence {scenario.min_confidence} должен "
                     "быть в [0, 1]"
                 )
+            if scenario.order not in ORDERS:
+                raise ValueError(
+                    f"сценарий {scenario.name!r}: order {scenario.order!r} должен быть "
+                    '"sequence" или "any"'
+                )
             if not scenario.patterns:
                 raise ValueError(f"сценарий {scenario.name!r} не содержит шаблонов")
             patterns: set[tuple[tuple[str, float, float], ...]] = set()
@@ -73,7 +80,15 @@ class RuleSet:
                 if not pattern:
                     raise ValueError(f"сценарий {scenario.name!r} содержит пустой шаблон")
                 tokens = [step.token for step in pattern]
-                if pattern[0].max_gap is not None:
+                if scenario.order == "any":
+                    for step in pattern:
+                        if step.max_gap is not None:
+                            raise ValueError(
+                                f"сценарий {scenario.name!r}: max_gap у шага {step.token!r} не "
+                                'задаётся при order "any" — задержка одна на сценарий и считается '
+                                "между соседними по времени шагами"
+                            )
+                elif pattern[0].max_gap is not None:
                     raise ValueError(
                         f"сценарий {scenario.name!r}: max_gap у первого шага {pattern[0].token!r} "
                         "не задаётся — новое совпадение задержку не проверяет"
@@ -96,6 +111,9 @@ class RuleSet:
                     (step.token, self.gap(scenario, step), self.threshold(scenario, step))
                     for step in pattern
                 )
+                if scenario.order == "any":
+                    # [<дверь>, <звук>] и [<звук>, <дверь>] — один и тот же шаблон
+                    key = tuple(sorted(key))
                 if key in patterns:
                     raise ValueError(f"сценарий {scenario.name!r}: шаблон {tokens} задан дважды")
                 patterns.add(key)
@@ -135,8 +153,9 @@ class RuleSet:
         """Шаблон — список шагов, а не строка через пробел: в токене бывают пробелы.
 
         Шаг — строка с токеном или объект `{"token": ..., "max_gap": ..., "min_score": ...}`.
-        `max_gap` и `min_score` у шага и у сценария необязательны, `min_confidence` и `cooldown`
-        сценария — тоже; `cooldown` по умолчанию 0. Неизвестный ключ на любом уровне — ошибка.
+        `max_gap` и `min_score` у шага и у сценария необязательны, `min_confidence`, `cooldown` и
+        `order` сценария — тоже; `cooldown` по умолчанию 0, `order` — "sequence". Неизвестный ключ
+        на любом уровне — ошибка.
         """
         check_keys(data, RULES_KEYS, "корень правил")
         scenarios = tuple(parse_scenario(item) for item in data["scenarios"])
@@ -169,6 +188,7 @@ def parse_scenario(item: dict) -> Scenario:
     return Scenario(
         name,
         tuple(tuple(parse_step(name, step) for step in pattern) for pattern in item["patterns"]),
+        item.get("order", "sequence"),
         float(item.get("cooldown", 0.0)),
         float(item["max_gap"]) if "max_gap" in item else None,
         float(item["min_score"]) if "min_score" in item else None,
