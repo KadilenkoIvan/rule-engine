@@ -69,6 +69,23 @@ class WaitingView(NamedTuple):
     until: float  # срок продолжения
 
 
+class MissView(NamedTuple):
+    """Почему событие не продвинуло совпадение или не дало сработать сценарию.
+
+    `reason` и смысл `need` и `got` — как у `Miss` в движке: `"score"`, `"late"`, `"expired"`,
+    `"pruned"`, `"confidence"`, `"repeat"`, `"cooldown"`.
+    """
+
+    reason: str
+    kind: str | None  # "node" или "set"; None — отказ сценария
+    place: int | None  # id вершины или набора; None — отказ сценария
+    filled: frozenset[int]  # закрытые шаги набора; иначе пусто
+    steps: tuple[EventView, ...]  # шаги совпадения; пусто — новое совпадение не началось
+    scenario: str | None  # у отказов сценария
+    need: float
+    got: float
+
+
 @dataclass(frozen=True)
 class Frame:
     """Состояние после события."""
@@ -76,3 +93,4 @@ class Frame:
     event: EventView
     matches: tuple[MatchView, ...]
     waiting: tuple[WaitingView, ...]
+    misses: tuple[MissView, ...]  # что событие не продвинуло и почему

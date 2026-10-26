@@ -13,13 +13,14 @@ from rule_engine.application.views import (
     Frame,
     GraphView,
     MatchView,
+    MissView,
     NodeView,
     SetView,
     SlotView,
     TokenEdge,
     WaitingView,
 )
-from rule_engine.domain.engine import Engine, Step, Waiting
+from rule_engine.domain.engine import Engine, Miss, Step, Waiting
 from rule_engine.domain.graph import Edge, Node, Start
 from rule_engine.domain.rules import RuleSet
 from rule_engine.domain.unordered import Unordered
@@ -65,6 +66,7 @@ def frames(engine: Engine, index: Index, lines: Iterable[str]) -> Iterator[Frame
                 for match in matches
             ),
             tuple(waiting_view(item, index) for item in engine.snapshot()),
+            tuple(miss_view(miss, index) for miss in engine.misses),
         )
 
 
@@ -113,3 +115,15 @@ def waiting_view(item: Waiting, index: Index) -> WaitingView:
         return WaitingView("node", node, frozenset(), steps, confidence, item.until)
     pattern, filled = item.place
     return WaitingView("set", index.sets[pattern], filled, steps, confidence, item.until)
+
+
+def miss_view(miss: Miss, index: Index) -> MissView:
+    steps = () if miss.partial is None else tuple(map(event_view, miss.partial.steps))
+    if miss.place is None:
+        kind, place, filled = None, None, frozenset()
+    elif isinstance(miss.place, Node):
+        kind, place, filled = "node", index.nodes[miss.place], frozenset()
+    else:
+        pattern, filled = miss.place
+        kind, place = "set", index.sets[pattern]
+    return MissView(miss.reason, kind, place, filled, steps, miss.scenario, miss.need, miss.got)

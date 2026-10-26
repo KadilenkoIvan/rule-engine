@@ -15,6 +15,16 @@ function debounce(action, delay) {
   };
 }
 
+// запросы по одному месту нумеруются: ответ на устаревший запрос отбрасывается, иначе медленный
+// старый ответ затёр бы свежий граф
+const tickets = {};
+
+async function latest(key, request) {
+  const ticket = (tickets[key] = (tickets[key] || 0) + 1);
+  const result = await request();
+  return ticket === tickets[key] ? result : null;
+}
+
 function showTab(name) {
   for (const tab of document.querySelectorAll("[data-tab]")) {
     const on = tab.dataset.tab === name;
@@ -23,20 +33,12 @@ function showTab(name) {
   }
 }
 
-async function loadExample(select, target) {
-  if (!select.value) return;
-  const response = await fetch(`/example?name=${encodeURIComponent(select.value)}`);
-  target.value = await response.text();
-}
-
-const refreshGraph = debounce(async () => {
-  $("graph").innerHTML = await post("/graph", { rules: $("rules").value });
-}, 400);
-
 // кадры прогона уже на странице: ползунок только показывает нужный
-function setupPlayer(root) {
+function setupPlayer(root, start) {
   const frames = root.querySelectorAll(".frame");
   const slider = root.querySelector(".player input[type=range]");
+  root.step = null;
+  root.current = null;
   if (!slider) return;
   const position = root.querySelector(".player .position");
   const show = (index) => {
@@ -56,20 +58,71 @@ function setupPlayer(root) {
     item.addEventListener("click", () => show(Number(item.dataset.frame)));
   }
   root.step = (delta) => show(Number(slider.value) + delta);
-  show(0);
+  root.current = () => Number(slider.value);
+  show(start);
 }
 
-$("rules").addEventListener("input", refreshGraph);
-$("rules-file").addEventListener("change", async () => {
-  await loadExample($("rules-file"), $("rules"));
+async function refreshGraph() {
+  $("graph").classList.add("pending");
+  const html = await latest("graph", () => post("/graph", { rules: $("rules").value }));
+  if (html === null) return;
+  $("graph").innerHTML = html;
+  $("graph").classList.remove("pending");
+}
+
+let traced = false; // прогон уже показан: дальше он пересчитывается при каждой правке
+
+async function runTrace() {
+  const trace = $("trace");
+  trace.classList.add("pending");
+  const html = await latest("trace", () =>
+    post("/trace", { rules: $("rules").value, stream: $("stream").value }),
+  );
+  if (html === null) return;
+  // после пересчёта остаёмся на том же кадре, если он ещё есть
+  const start = trace.current ? trace.current() : 0;
+  trace.innerHTML = html;
+  trace.classList.remove("pending");
+  setupPlayer(trace, start);
+  traced = true;
+}
+
+const refreshAll = debounce(() => {
   refreshGraph();
+  if (traced) runTrace();
+}, 400);
+
+const refreshTrace = debounce(() => {
+  if (traced) runTrace();
+}, 400);
+
+async function loadExample(select, target, refresh) {
+  if (!select.value) return;
+  const name = select.value;
+  const text = await latest(select.id, async () => {
+    const response = await fetch(`/example?name=${encodeURIComponent(name)}`);
+    return response.text();
+  });
+  if (text === null) return;
+  target.value = text;
+  refresh();
+}
+
+// своя правка — уже не пример из списка
+$("rules").addEventListener("input", () => {
+  $("rules-file").value = "";
+  refreshAll();
 });
-$("stream-file").addEventListener("change", () => loadExample($("stream-file"), $("stream")));
+$("stream").addEventListener("input", () => {
+  $("stream-file").value = "";
+  refreshTrace();
+});
+$("rules-file").addEventListener("change", () => loadExample($("rules-file"), $("rules"), refreshAll));
+$("stream-file").addEventListener("change", () => loadExample($("stream-file"), $("stream"), refreshTrace));
 
 $("run").addEventListener("click", async () => {
-  $("trace").innerHTML = await post("/trace", { rules: $("rules").value, stream: $("stream").value });
   showTab("trace");
-  setupPlayer($("trace"));
+  await runTrace();
 });
 
 for (const tab of document.querySelectorAll("[data-tab]")) {

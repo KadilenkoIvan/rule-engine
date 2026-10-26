@@ -9,6 +9,8 @@
   --accent-weak: #e6eefc;
   --ok: #1f8a4c;
   --ok-weak: #e3f4ea;
+  --warn: #b26a00;
+  --warn-weak: #fdf1df;
   --error: #c62f3a;
   --error-weak: #fbe9ea;
   --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
@@ -27,6 +29,8 @@
     --accent-weak: #22304a;
     --ok: #4cc283;
     --ok-weak: #1c3328;
+    --warn: #e5a23c;
+    --warn-weak: #3a2d17;
     --error: #ef6b74;
     --error-weak: #3a2024;
     color-scheme: dark;
@@ -147,7 +151,9 @@ button.primary {
 .graph .root { fill: var(--text); }
 .edge path { fill: none; stroke: var(--line); stroke-width: 1.5; }
 .edge .label { text-anchor: middle; }
-.edge.passed path { stroke: var(--accent); stroke-width: 3; }
+.edge.missed path { stroke: var(--error); stroke-width: 2; stroke-dasharray: 5 4; }
+.edge.missed .label { fill: var(--error); font-weight: 700; }
+.edge.passed path { stroke: var(--accent); stroke-width: 3; stroke-dasharray: none; }
 .edge.passed .label { fill: var(--accent); font-weight: 700; }
 .node circle { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
 .node.active circle { fill: var(--accent); stroke: var(--accent); }
@@ -157,7 +163,7 @@ button.primary {
 .node .count { font-size: 11px; fill: var(--accent); text-anchor: end; }
 
 .sets { margin-top: 12px; }
-.sets h4, .log h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.sets h4, .log h4, .misses h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
 
 .set {
   padding: 8px 10px;
@@ -167,6 +173,7 @@ button.primary {
   background: var(--surface);
 }
 
+.set.missed { border-color: var(--error); }
 .set.fired { border-color: var(--ok); background: var(--ok-weak); }
 .set .scenario { color: var(--muted); margin-left: 6px; }
 .set.fired .scenario { color: var(--ok); font-weight: 700; }
@@ -263,3 +270,33 @@ ul.fired li, .log li {
 .log li { cursor: pointer; border-color: var(--border); background: var(--surface); }
 .log li.current { border-color: var(--ok); background: var(--ok-weak); }
 .log li .steps, ul.fired li .steps { margin-top: 2px; }
+
+.misses {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--warn);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.misses ul, .expired ul { list-style: none; margin: 0; padding: 0; }
+.expired { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.expired summary { cursor: pointer; }
+.note { margin: 3px 0; }
+.note .tag {
+  display: inline-block;
+  min-width: 9.5em;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+.note.score .tag { background: var(--error-weak); color: var(--error); }
+.note.late .tag { background: var(--warn-weak); color: var(--warn); }
+.note.repeat .tag { background: var(--bg); color: var(--muted); }
+.note.skip { color: var(--muted); }
+
+.panel.pending { opacity: 0.55; transition: opacity 0.15s; }
