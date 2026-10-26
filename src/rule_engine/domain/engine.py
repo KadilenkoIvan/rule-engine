@@ -5,9 +5,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from rule_engine.graph import Node, build_graph
-from rule_engine.rules import RuleSet
-from rule_engine.unordered import Unordered, build_unordered
+from rule_engine.domain.graph import Node, Start, build_graph
+from rule_engine.domain.rules import RuleSet
+from rule_engine.domain.unordered import Unordered, build_unordered
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,14 @@ class Partial(NamedTuple):
 
     def extend(self, step: Step) -> "Partial":
         return Partial(self.steps + (step,), self.product * step.event.score)
+
+
+class Waiting(NamedTuple):
+    """Частичное совпадение в снимке движка: где оно стоит и до какого момента ждёт."""
+
+    place: Node | tuple[Unordered, frozenset[int]]  # вершина бора или (шаблон `any`, закрытые шаги)
+    partial: Partial
+    until: float  # секунды: срок продолжения
 
 
 def dominates(a: Partial, b: Partial) -> bool:
@@ -132,6 +140,39 @@ class Engine:
         return sum(len(partials) for partials in self._active.values()) + sum(
             len(partials) for partials in self._sets.values()
         )
+
+    @property
+    def starts(self) -> dict[Start, Node]:
+        """Рёбра из корня бора, по которому идёт движок."""
+        return self._starts
+
+    @property
+    def unordered(self) -> list[Unordered]:
+        return self._unordered
+
+    @property
+    def position(self) -> int:
+        """Номер, который получит следующее событие."""
+        return self._position
+
+    def snapshot(self) -> list[Waiting]:
+        """Все частичные совпадения: в вершинах бора и в наборах `any`."""
+        # в `_active` стоят только вершины с рёбрами: в остальных ждать нечего
+        waiting = [
+            Waiting(
+                node,
+                partial,
+                partial.steps[-1].event.time + max(edge.max_gap for edge in node.children),
+            )
+            for node, partials in self._active.items()
+            for partial in partials
+        ]
+        waiting += [
+            Waiting(key, partial, partial.steps[-1].event.time + key[0].max_gap)
+            for key, partials in self._sets.items()
+            for partial in partials
+        ]
+        return waiting
 
     def feed(self, events: Iterable[Event]) -> list[Match]:
         matches: list[Match] = []

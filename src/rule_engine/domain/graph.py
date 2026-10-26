@@ -6,8 +6,7 @@
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
-from rule_engine.rules import RuleSet
-from rule_engine.unordered import Unordered
+from rule_engine.domain.rules import RuleSet
 
 
 class Start(NamedTuple):
@@ -79,47 +78,3 @@ def graph_size(starts: dict[Start, Node]) -> int:
 
     return sum(size(node) for node in starts.values())
 
-
-def render(starts: dict[Start, Node], unordered: list[Unordered], rules: RuleSet) -> str:
-    """Бор, под ним шаблоны `any`. Задержку и порог показывает, где они отличаются от `max_gap` и
-    `min_score` корня."""
-    lines = ["(начало)"]
-
-    def label(edge: Start | Edge) -> str:
-        notes = []
-        if isinstance(edge, Edge) and edge.max_gap != rules.max_gap:
-            notes.append(f"{edge.max_gap:g} с")
-        if edge.min_score != rules.min_score:
-            notes.append(f"≥ {edge.min_score:g}")
-        return f"{edge.token} [{', '.join(notes)}]" if notes else edge.token
-
-    def walk(edges: dict[Start, Node] | dict[Edge, Node], indent: str) -> None:
-        for index, (edge, node) in enumerate(edges.items()):
-            last = index == len(edges) - 1
-            mark = f"  ⇒ {node.scenario}" if node.scenario is not None else ""
-            lines.append(f"{indent}{'└─ ' if last else '├─ '}{label(edge)}{mark}")
-            walk(node.children, indent + ("   " if last else "│  "))
-
-    def label_set(pattern: Unordered) -> str:
-        # одинаковые у всех шагов пороги показаны один раз, после набора
-        common = len({slot.min_score for slot in pattern.slots}) == 1
-        tokens = ", ".join(
-            slot.token
-            if common or slot.min_score == rules.min_score
-            else f"{slot.token} [≥ {slot.min_score:g}]"
-            for slot in pattern.slots
-        )
-        notes = []
-        if len(pattern.slots) > 1 and pattern.max_gap != rules.max_gap:
-            notes.append(f"{pattern.max_gap:g} с")
-        if common and pattern.slots[0].min_score != rules.min_score:
-            notes.append(f"≥ {pattern.slots[0].min_score:g}")
-        return f"{{{tokens}}} [{', '.join(notes)}]" if notes else f"{{{tokens}}}"
-
-    walk(starts, "")
-    if unordered:
-        lines.append("(в любом порядке)")
-        for index, pattern in enumerate(unordered):
-            branch = "└─ " if index == len(unordered) - 1 else "├─ "
-            lines.append(f"{branch}{label_set(pattern)}  ⇒ {pattern.scenario}")
-    return "\n".join(lines)

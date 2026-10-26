@@ -2,7 +2,7 @@
 
 from typing import NamedTuple
 
-from rule_engine.rules import RuleSet
+from rule_engine.domain.rules import RuleSet
 
 
 class Slot(NamedTuple):

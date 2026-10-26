@@ -1,0 +1,47 @@
+{% import "macros.html" as m %}
+{% if error is not none %}
+<div class="error"><strong>Ошибка{% if frames %} после кадра {{ frames|length }}{% endif %}.</strong> {{ error }}</div>
+{% endif %}
+{% if frames %}
+{% set lay = layout(graph) %}
+{% set paths = Paths(graph) %}
+<div class="player">
+  <div class="controls">
+    <button type="button" data-step="-1" title="Предыдущий кадр (←)">◀</button>
+    <input type="range" min="0" max="{{ frames|length - 1 }}" value="0" aria-label="Кадр">
+    <button type="button" data-step="1" title="Следующий кадр (→)">▶</button>
+    <span class="position muted"></span>
+  </div>
+  <div class="columns">
+    <div class="frames">
+      {% for frame in frames %}
+      {% set state = paths.state(frame) %}
+      <section class="frame" data-index="{{ loop.index0 }}"{% if not loop.first %} hidden{% endif %}>
+        <h3>{{ m.title(frame) }}</h3>
+        {% if frame.matches %}
+        <ul class="fired">
+          {% for match in frame.matches %}<li>{{ m.match(match) }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        <div class="canvas">{{ m.svg(lay, state) }}</div>
+        {{ m.sets(graph, state, frame) }}
+        {{ m.waiting(frame, paths) }}
+      </section>
+      {% endfor %}
+    </div>
+    <aside class="log">
+      <h4>Все срабатывания</h4>
+      <ol>
+        {% for frame in frames %}
+        {% set index = loop.index0 %}
+        {% for match in frame.matches %}
+        <li data-frame="{{ index }}" title="Перейти к кадру">{{ m.match(match) }}</li>
+        {% endfor %}
+        {% endfor %}
+      </ol>
+    </aside>
+  </div>
+</div>
+{% elif error is none %}
+<p class="muted">В потоке нет событий.</p>
+{% endif %}

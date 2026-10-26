@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rule-engine</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>rule-engine</h1>
+    <span class="muted">детектор составных событий умного дома</span>
+  </header>
+  <main class="layout">
+    <section class="inputs">
+      <div class="field">
+        <div class="field-head">
+          <label for="rules">Правила</label>
+          <select id="rules-file" aria-label="Пример правил">
+            <option value="">— пример —</option>
+            {% for name in rules_files %}<option{% if loop.first %} selected{% endif %}>{{ name }}</option>{% endfor %}
+          </select>
+        </div>
+        <textarea id="rules" spellcheck="false">{{ rules_text }}</textarea>
+      </div>
+      <div class="field">
+        <div class="field-head">
+          <label for="stream">Поток</label>
+          <select id="stream-file" aria-label="Пример потока">
+            <option value="">— пример —</option>
+            {% for name in stream_files %}<option{% if loop.first %} selected{% endif %}>{{ name }}</option>{% endfor %}
+          </select>
+        </div>
+        <textarea id="stream" spellcheck="false">{{ stream_text }}</textarea>
+        <p class="hint muted">Строка — «токен уверенность время».</p>
+      </div>
+      <button type="button" id="run" class="primary">Прогнать поток</button>
+    </section>
+    <section class="view">
+      <nav class="tabs">
+        <button type="button" data-tab="graph" class="on">Граф</button>
+        <button type="button" data-tab="trace">Прогон</button>
+      </nav>
+      <div id="graph" class="panel">
+        {% if graph is not none %}{% include "graph.html" %}{% else %}<div class="error"><strong>Ошибка.</strong> {{ error }}</div>{% endif %}
+      </div>
+      <div id="trace" class="panel" hidden>
+        <p class="muted">Нажмите «Прогнать поток»: здесь появятся кадры — по одному на строку потока.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
