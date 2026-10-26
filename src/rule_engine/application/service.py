@@ -1,0 +1,115 @@
+"""Сценарии использования: правила и поток приходят текстом, наружу уходят view-модели.
+
+Откуда взять текст — из файла или из формы — решает интерфейс.
+"""
+
+import json
+from collections.abc import Iterable, Iterator
+from typing import NamedTuple
+
+from rule_engine.application.stream import parse_stream
+from rule_engine.application.views import (
+    EventView,
+    Frame,
+    GraphView,
+    MatchView,
+    NodeView,
+    SetView,
+    SlotView,
+    TokenEdge,
+    WaitingView,
+)
+from rule_engine.domain.engine import Engine, Step, Waiting
+from rule_engine.domain.graph import Edge, Node, Start
+from rule_engine.domain.rules import RuleSet
+from rule_engine.domain.unordered import Unordered
+
+
+class Trace(NamedTuple):
+    graph: GraphView
+    frames: Iterator[Frame]  # кадр на событие; ошибка в строке вылетает вместо её кадра
+
+
+class Index(NamedTuple):
+    """id вершин и наборов: по ним снимок совпадений ссылается на `GraphView`."""
+
+    nodes: dict[Node, int]
+    sets: dict[Unordered, int]
+
+
+class RuleEngineService:
+    def graph(self, rules_text: str) -> GraphView:
+        rules = parse_rules(rules_text)
+        return describe(Engine(rules), rules)[0]
+
+    def trace(self, rules_text: str, lines: Iterable[str]) -> Trace:
+        """Прогон потока. Кадры идут генератором: CLI печатает их по ходу, веб собирает все."""
+        rules = parse_rules(rules_text)
+        engine = Engine(rules)
+        graph, index = describe(engine, rules)
+        return Trace(graph, frames(engine, index, lines))
+
+
+def parse_rules(text: str) -> RuleSet:
+    return RuleSet.from_dict(json.loads(text))
+
+
+def frames(engine: Engine, index: Index, lines: Iterable[str]) -> Iterator[Frame]:
+    for event in parse_stream(lines):
+        step = Step(engine.position, event)
+        matches = engine.push(event)
+        yield Frame(
+            event_view(step),
+            tuple(
+                MatchView(match.scenario, tuple(map(event_view, match.steps)), match.confidence)
+                for match in matches
+            ),
+            tuple(waiting_view(item, index) for item in engine.snapshot()),
+        )
+
+
+def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
+    """Граф движка как view; вершины нумеруются в порядке обхода, как их печатает CLI."""
+    nodes: dict[Node, int] = {}
+
+    def edge_view(edge: Start | Edge) -> TokenEdge:
+        min_score = None if edge.min_score == rules.min_score else edge.min_score
+        if isinstance(edge, Start) or edge.max_gap == rules.max_gap:
+            return TokenEdge(edge.token, None, min_score)
+        return TokenEdge(edge.token, edge.max_gap, min_score)
+
+    def node_view(edge: Start | Edge, node: Node) -> NodeView:
+        nodes[node] = len(nodes)
+        children = tuple(node_view(child_edge, child) for child_edge, child in node.children.items())
+        return NodeView(nodes[node], edge_view(edge), node.scenario, children)
+
+    roots = tuple(node_view(start, node) for start, node in engine.starts.items())
+    sets = {pattern: number for number, pattern in enumerate(engine.unordered)}
+    set_views = tuple(
+        SetView(
+            sets[pattern],
+            pattern.scenario,
+            tuple(
+                SlotView(slot.token, None if slot.min_score == rules.min_score else slot.min_score)
+                for slot in pattern.slots
+            ),
+            None if pattern.max_gap == rules.max_gap else pattern.max_gap,
+        )
+        for pattern in engine.unordered
+    )
+    graph = GraphView(roots, set_views, tuple(sorted(rules.vocabulary)))
+    return graph, Index(nodes, sets)
+
+
+def event_view(step: Step) -> EventView:
+    return EventView(step.position, step.event.token, step.event.score, step.event.time)
+
+
+def waiting_view(item: Waiting, index: Index) -> WaitingView:
+    steps = tuple(map(event_view, item.partial.steps))
+    confidence = item.partial.confidence
+    if isinstance(item.place, Node):
+        node = index.nodes[item.place]
+        return WaitingView("node", node, frozenset(), steps, confidence, item.until)
+    pattern, filled = item.place
+    return WaitingView("set", index.sets[pattern], filled, steps, confidence, item.until)

@@ -4,6 +4,72 @@
 звуковых сигналов) с уверенностью детектора и временем, на выходе получаются
 сработавшие сценарии.
 
+## Использование
+
+### Установка
+
+```bash
+uv sync   # движок, командная строка и веб-интерфейс (FastAPI, uvicorn, Jinja2)
+```
+
+### Выбор интерфейса
+
+Первый аргумент выбирает интерфейс, остальные получает он сам:
+
+```bash
+uv run rule-engine cli …   # командная строка
+uv run rule-engine web …   # веб-интерфейс
+```
+
+Оба работают с одним и тем же движком, поэтому на одних правилах и потоке дают
+одни и те же срабатывания.
+
+### Командная строка
+
+```bash
+uv run rule-engine cli graph examples/smart_home.json                     # граф сценариев
+uv run rule-engine cli run examples/smart_home.json examples/stream.txt   # прогнать поток
+```
+
+`graph` печатает граф деревом, `run` — строку на каждое срабатывание и число
+незавершённых совпадений в конце. Форматы правил, потока и вывода описаны в
+разделе [Форматы](#форматы), все примеры — в разделе [Все примеры](#все-примеры).
+Ошибка в правилах или потоке завершает команду исключением с текстом ошибки.
+
+### Веб-интерфейс
+
+```bash
+uv run rule-engine web examples                            # http://127.0.0.1:8000
+uv run rule-engine web examples --host 0.0.0.0 --port 9000
+```
+
+`examples` — папка с правилами `*.json` и потоками `*.txt`: они появятся в
+выпадающих списках, первые по алфавиту открыты сразу. Сервер останавливается по
+Ctrl+C.
+
+Слева два поля: «Правила» и «Поток». Текст в них можно править или выбрать
+пример из списка. Справа две вкладки.
+
+- **Граф.** Перерисовывается при каждой правке правил. Если в правилах ошибка,
+  вместо графа показан её текст. Под деревом — шаблоны `any` («В любом
+  порядке»).
+- **Прогон.** «Прогнать поток» показывает по кадру на событие. Кадры листают
+  кнопки ◀ ▶, ползунок и стрелки клавиатуры. Клик по срабатыванию в колонке
+  «Все срабатывания» открывает его кадр. В кадре — событие, сработавшие
+  сценарии, граф с состоянием, наборы `any` с закрытыми шагами и таблица
+  частичных совпадений: где стоит, какие шаги собраны, уверенность, до какого
+  момента ждёт. Если строка потока неверна, видны кадры до неё и текст ошибки.
+
+Обозначения на графе:
+
+| Знак | Значение |
+|---|---|
+| ● | начало |
+| синяя вершина, `×2` | здесь стоят частичные совпадения, `×2` — сколько их |
+| синее ребро | пройдено совпадениями этого кадра |
+| зелёная вершина, `✓ «…»` | сценарий сработал в этом кадре |
+| `● ○` в наборе `any` | закрытые и открытые шаги набора |
+
 ## Как работает
 
 1. В [examples/smart_home.json](examples/smart_home.json) заданы словарь токенов
@@ -438,7 +504,7 @@
 Начало отсчёта одно на весь поток: в работе это Unix time, в примерах — начало
 записи. Задержкам нужны только разности времён.
 
-`run` печатает строку на срабатывание: сценарий, его общую уверенность и шаги.
+`cli run` печатает строку на срабатывание: сценарий, его общую уверенность и шаги.
 У каждого шага в скобках — токен, его уверенность и время:
 
 ```
@@ -448,26 +514,49 @@
 
 Последняя строка — сколько частичных совпадений ещё ждут продолжения.
 
-## Файлы
+## Устройство кода
 
-- [rules.py](src/rule_engine/rules.py): словарь и сценарии, загрузка JSON, проверки;
-- [graph.py](src/rule_engine/graph.py): построение и печать графа;
-- [unordered.py](src/rule_engine/unordered.py): шаблоны сценариев с `"order": "any"`;
-- [engine.py](src/rule_engine/engine.py): проход потока по графу и по наборам `any`;
-- [cli.py](src/rule_engine/cli.py): командная строка.
+Код разделён на слои, зависимости идут только вниз:
 
-## Запуск
+```
+main.py — выбирает интерфейс: rule-engine cli … | rule-engine web …
+   ├─> interfaces/cli ─┐   argparse, текст
+   └─> interfaces/web ─┤   контроллер, HTML и SVG; server.py — FastAPI
+                       ▼
+                application/   RuleEngineService, view-модели, формат потока
+                       ▼
+                   domain/     правила, граф, проход потока
+```
+
+CLI и веб взаимозаменяемы: оба работают только через `RuleEngineService` и не
+видят объектов домена, а друг о друге не знают. Фреймворк знает только
+`server.py`.
+
+- [main.py](src/rule_engine/main.py): точка сборки, выбор интерфейса;
+- [domain/rules.py](src/rule_engine/domain/rules.py): словарь и сценарии, загрузка JSON, проверки;
+- [domain/graph.py](src/rule_engine/domain/graph.py): построение графа;
+- [domain/unordered.py](src/rule_engine/domain/unordered.py): шаблоны сценариев с `"order": "any"`;
+- [domain/engine.py](src/rule_engine/domain/engine.py): проход потока по графу и по наборам `any`, снимок совпадений;
+- [application/service.py](src/rule_engine/application/service.py): сценарии использования — граф и прогон;
+- [application/views.py](src/rule_engine/application/views.py): view-модели — граф, кадры, срабатывания;
+- [application/stream.py](src/rule_engine/application/stream.py): формат потока;
+- [interfaces/base.py](src/rule_engine/interfaces/base.py): контракт `Interface`;
+- [interfaces/cli/](src/rule_engine/interfaces/cli): командная строка и печать графа;
+- [interfaces/web/](src/rule_engine/interfaces/web): контроллер, презентер, раскладка SVG, шаблоны, статика;
+- [interfaces/web/server.py](src/rule_engine/interfaces/web/server.py): маршруты FastAPI.
+
+## Все примеры
 
 ```bash
-uv sync
-uv run rule-engine graph examples/smart_home.json                        # показать граф
-uv run rule-engine run examples/smart_home.json examples/stream.txt      # прогнать поток
-uv run rule-engine run examples/smart_home.json examples/pause.txt       # задержка больше 3 с
-uv run rule-engine run examples/smart_home.json examples/alarm.txt       # звуковые сигналы
-uv run rule-engine run examples/smart_home.json examples/repeats.txt     # копии и повторы
-uv run rule-engine run examples/smart_home.json examples/gaps.txt        # задержки между шагами
-uv run rule-engine run examples/smart_home.json examples/scores.txt      # пороги уверенности токена
-uv run rule-engine run examples/smart_home.json examples/confidence.txt  # общая уверенность
-uv run rule-engine run examples/smart_home.json examples/order.txt       # любой порядок
+uv run rule-engine cli graph examples/smart_home.json                        # показать граф
+uv run rule-engine cli run examples/smart_home.json examples/stream.txt      # прогнать поток
+uv run rule-engine cli run examples/smart_home.json examples/pause.txt       # задержка больше 3 с
+uv run rule-engine cli run examples/smart_home.json examples/alarm.txt       # звуковые сигналы
+uv run rule-engine cli run examples/smart_home.json examples/repeats.txt     # копии и повторы
+uv run rule-engine cli run examples/smart_home.json examples/gaps.txt        # задержки между шагами
+uv run rule-engine cli run examples/smart_home.json examples/scores.txt      # пороги уверенности токена
+uv run rule-engine cli run examples/smart_home.json examples/confidence.txt  # общая уверенность
+uv run rule-engine cli run examples/smart_home.json examples/order.txt       # любой порядок
+uv run rule-engine web examples                                              # всё то же в браузере
 uv run pytest
 ```

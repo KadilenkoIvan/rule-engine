@@ -1,0 +1,90 @@
+{# Части страницы, общие для графа и прогона. #}
+
+{% macro svg(lay, state) %}
+{# граф сжимается до ширины панели, но не мельче 60 %: дальше — прокрутка #}
+<svg class="graph" viewBox="0 0 {{ lay.width|g }} {{ lay.height|g }}" width="100%"
+     style="max-width: {{ lay.width|g }}px; min-width: {{ (lay.width * 0.6)|round|int }}px"
+     role="img" aria-label="Граф сценариев">
+  <circle class="root" cx="{{ lay.root_x|g }}" cy="{{ lay.root_y|g }}" r="5"/>
+  {% for box in lay.boxes %}
+  <g class="edge{% if box.id in state.passed %} passed{% endif %}">
+    <path d="{{ box.path }}"/>
+    <text class="label" x="{{ box.label_x|g }}" y="{{ (box.y - 8)|g }}">{{ box.label }}</text>
+  </g>
+  {% endfor %}
+  {% for box in lay.boxes %}
+  <g class="node{% if box.id in state.active %} active{% endif %}{% if box.id in state.fired %} fired{% endif %}">
+    <circle cx="{{ box.x|g }}" cy="{{ box.y|g }}" r="6"/>
+    {% if state.active.get(box.id, 0) > 1 %}
+    <text class="count" x="{{ (box.x - 8)|g }}" y="{{ (box.y - 9)|g }}">×{{ state.active[box.id] }}</text>
+    {% endif %}
+    {% if box.scenario is not none %}
+    <text class="scenario" x="{{ (box.x + 14)|g }}" y="{{ (box.y + 4)|g }}">{% if box.id in state.fired %}✓ {% endif %}«{{ box.scenario }}»</text>
+    {% endif %}
+  </g>
+  {% endfor %}
+</svg>
+{% endmacro %}
+
+{% macro sets(graph, state, frame) %}
+{% if graph.sets %}
+<div class="sets">
+  <h4>В любом порядке</h4>
+  {% for pattern in graph.sets %}
+  <div class="set{% if pattern.id in state.fired_sets %} fired{% endif %}">
+    <span class="slots">
+      {% for slot in pattern.slots %}
+      <span class="slot">{{ slot.token }}{% if slot.min_score is not none %} ≥ {{ slot.min_score|g }}{% endif %}</span>
+      {% endfor %}
+    </span>
+    {% if pattern.max_gap is not none and pattern.slots|length > 1 %}
+    <span class="muted">{{ pattern.max_gap|g }} с</span>
+    {% endif %}
+    <span class="scenario">{% if pattern.id in state.fired_sets %}✓ {% endif %}«{{ pattern.scenario }}»</span>
+    {% for item in state.sets.get(pattern.id, []) %}
+    <div class="progress">
+      {% for slot in pattern.slots %}<span class="dot{% if loop.index0 in item.filled %} on{% endif %}" title="{{ slot.token }}"></span>{% endfor %}
+      <span class="muted">{{ item.confidence|score }} · ждёт до {{ item.until|g }}, ещё {{ "%.1f"|format(item.until - frame.event.time) }} с</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+
+{% macro steps(items) %}
+{% for step in items %}
+<span class="step"><span class="muted">#{{ step.position }}</span> {{ step.token }} <span class="muted">{{ step.score|score }} @ {{ step.time|g }}</span></span>
+{% endfor %}
+{% endmacro %}
+
+{% macro match(item) %}
+<span class="ok">✓</span> <strong>{{ item.scenario }}</strong> <span class="muted">{{ item.confidence|score }}</span>
+<div class="steps">{{ steps(item.steps) }}</div>
+{% endmacro %}
+
+{% macro title(frame) %}
+<span class="muted">#{{ frame.event.position }}</span> {{ frame.event.token }}
+<span class="muted">{{ frame.event.score|score }} @ {{ frame.event.time|g }}</span>
+{% endmacro %}
+
+{% macro waiting(frame, paths) %}
+{% if frame.waiting %}
+<table class="waiting">
+  <thead><tr><th>Где</th><th>Шаги</th><th>Уверенность</th><th>Ждёт</th></tr></thead>
+  <tbody>
+    {% for item in frame.waiting %}
+    <tr>
+      <td>{{ paths.where(item) }}</td>
+      <td>{{ steps(item.steps) }}</td>
+      <td>{{ item.confidence|score }}</td>
+      <td>до {{ item.until|g }} <span class="muted">ещё {{ "%.1f"|format(item.until - frame.event.time) }} с</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Частичных совпадений нет.</p>
+{% endif %}
+{% endmacro %}
