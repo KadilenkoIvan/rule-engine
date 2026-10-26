@@ -7,6 +7,7 @@ from pathlib import Path
 from rule_engine.engine import Engine, Event, Match
 from rule_engine.graph import build_graph, render
 from rule_engine.rules import load_rules
+from rule_engine.unordered import build_unordered
 
 
 def parse_stream(lines: Iterable[str]) -> Iterator[Event]:
@@ -49,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rules = load_rules(args.rules)
     if args.command == "graph":
-        print(render(build_graph(rules), rules))
+        print(render(build_graph(rules), build_unordered(rules), rules))
         return 0
 
     engine = Engine(rules)

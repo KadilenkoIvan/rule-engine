@@ -1,4 +1,4 @@
-"""Проход потока токенов по графу сценариев."""
+"""Проход потока токенов по графу сценариев и по шаблонам `any`."""
 
 import math
 from collections.abc import Iterable
@@ -7,6 +7,7 @@ from typing import NamedTuple
 
 from rule_engine.graph import Node, build_graph
 from rule_engine.rules import RuleSet
+from rule_engine.unordered import Unordered, build_unordered
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,14 @@ def dominates(a: Partial, b: Partial) -> bool:
     return a.steps[-1].position >= b.steps[-1].position and a.product >= b.product
 
 
+def keep(partials: list[Partial], partial: Partial) -> None:
+    """Добавляет совпадение к несравнимым, если его никто не вытесняет, и убирает вытесненные им."""
+    if any(dominates(other, partial) for other in partials):
+        return
+    partials[:] = [other for other in partials if not dominates(partial, other)]
+    partials.append(partial)
+
+
 class Engine:
     """Частичные совпадения хранятся между вызовами, поэтому поток можно подавать порциями.
 
@@ -87,6 +96,11 @@ class Engine:
     - Сценарий срабатывает при входе в вершину, где заканчивается один из его шаблонов. Если
       из неё есть продолжения (более длинные шаблоны с тем же началом), совпадение остаётся
       активным.
+    - Шаблоны сценариев с `order: "any"` идут мимо бора. Их совпадение — набор закрытых шагов:
+      токен закрывает любой ещё открытый шаг со своим токеном, если проходит его порог и
+      укладывается в задержку от последнего шага. `<дверь> <шаги>` и `<шаги> <дверь>` дают одно
+      состояние `{<дверь>, <шаги>}`. Копия, вытеснение и ранний отсев — как в вершине бора;
+      совпадение снимается, когда его задержка истекла.
     - Если на одном событии завершились несколько совпадений одного сценария, выдаётся не
       больше одного: последний токен у них общий. Выдаётся самое уверенное, а при равной
       уверенности — начавшееся позже.
@@ -104,7 +118,10 @@ class Engine:
             scenario.name: rules.confidence_threshold(scenario) for scenario in rules.scenarios
         }
         self._starts = build_graph(rules)
+        self._unordered = build_unordered(rules)
         self._active: dict[Node, list[Partial]] = {}  # вершина → несравнимые совпадения в ней
+        # (шаблон `any`, номера закрытых шагов) → несравнимые совпадения в этом состоянии
+        self._sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
         self._position = 0
@@ -112,7 +129,9 @@ class Engine:
 
     @property
     def active_count(self) -> int:
-        return sum(len(partials) for partials in self._active.values())
+        return sum(len(partials) for partials in self._active.values()) + sum(
+            len(partials) for partials in self._sets.values()
+        )
 
     def feed(self, events: Iterable[Event]) -> list[Match]:
         matches: list[Match] = []
@@ -133,21 +152,22 @@ class Engine:
 
         matches: list[Match] = []
         active: dict[Node, list[Partial]] = {}
+        sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
-
-        def keep(node: Node, partial: Partial) -> None:
-            partials = active.setdefault(node, [])
-            if any(dominates(other, partial) for other in partials):
-                return
-            partials[:] = [other for other in partials if not dominates(partial, other)]
-            partials.append(partial)
 
         def enter(node: Node, partial: Partial) -> None:
             if node.scenario is not None:
                 completed.setdefault(node.scenario, []).append(partial)
             # ранний отсев; у вершины без продолжений `ahead` пуст, и совпадение в ней не остаётся
             if any(partial.bound(length) >= threshold for length, threshold in node.ahead):
-                keep(node, partial)
+                keep(active.setdefault(node, []), partial)
+
+        def collect(pattern: Unordered, filled: frozenset[int], partial: Partial) -> None:
+            length = len(pattern.slots)
+            if len(filled) == length:
+                completed.setdefault(pattern.scenario, []).append(partial)
+            elif partial.bound(length) >= pattern.min_confidence:  # ранний отсев
+                keep(sets.setdefault((pattern, filled), []), partial)
 
         def fire(scenario: str, partials: list[Partial]) -> None:
             taken = self._taken.setdefault(scenario, set())
@@ -173,7 +193,8 @@ class Engine:
                 elapsed = event.time - partial.steps[-1].event.time
                 if all(elapsed > edge.max_gap for edge in node.children):
                     continue  # сроки всех рёбер из вершины истекли: совпадение снято
-                keep(node, partial)  # копия остаётся в вершине и ждёт другого продолжения
+                # копия остаётся в вершине и ждёт другого продолжения
+                keep(active.setdefault(node, []), partial)
                 for edge, child in node.children.items():
                     if (
                         edge.token == event.token
@@ -184,15 +205,31 @@ class Engine:
         for start, child in self._starts.items():
             if start.token == event.token and event.score >= start.min_score:
                 enter(child, Partial((step,), event.score))  # новое совпадение задержку не проверяет
+        for (pattern, filled), partials in self._sets.items():
+            for partial in partials:
+                if event.time - partial.steps[-1].event.time > pattern.max_gap:
+                    continue  # задержка у открытых шагов одна, и она истекла: совпадение снято
+                keep(sets.setdefault((pattern, filled), []), partial)  # копия ждёт другого шага
+                for index in pattern.free(filled, event.token, event.score):
+                    collect(pattern, filled | {index}, partial.extend(step))
+        for pattern in self._unordered:
+            # начать набор может любой его шаг
+            for index in pattern.free(frozenset(), event.token, event.score):
+                collect(pattern, frozenset({index}), Partial((step,), event.score))
         # срабатывания выдаются после обхода: из совпадений сценария выбирается самое уверенное
         for scenario, partials in completed.items():
             fire(scenario, partials)
 
         self._active = active
+        self._sets = sets
         # новые срабатывания состоят из позиций не раньше начала самого старого активного
         # совпадения, более ранние можно забыть
         oldest = min(
-            (partial.steps[0].position for partials in active.values() for partial in partials),
+            (
+                partial.steps[0].position
+                for partials in (*active.values(), *sets.values())
+                for partial in partials
+            ),
             default=self._position,
         )
         for taken in self._taken.values():
