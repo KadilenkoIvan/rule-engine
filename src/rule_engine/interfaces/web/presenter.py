@@ -219,6 +219,7 @@ class Presenter:
         stream_text: str,
         graph: GraphView | None,
         error: str | None,
+        session: str,
     ) -> str:
         return self._env.get_template("page.html").render(
             rules_files=rules_files,
@@ -227,6 +228,7 @@ class Presenter:
             stream_text=stream_text,
             graph=graph,
             error=error,
+            session=session,
         )
 
     def graph(self, graph: GraphView) -> str:

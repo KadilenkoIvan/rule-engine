@@ -31,8 +31,12 @@ def create_app(controller: WebController, static: Path) -> FastAPI:
         return respond(controller.example(name))
 
     @app.post("/graph")
-    def graph(rules: str = Form("")) -> Response:
-        return respond(controller.graph(rules))
+    def graph(rules: str = Form(""), session: str = Form("")) -> Response:
+        return respond(controller.graph(rules, session))
+
+    @app.post("/scenario")
+    def add_scenario(session: str = Form(""), scenario: str = Form("")) -> Response:
+        return respond(controller.add_scenario(session, scenario))
 
     @app.post("/trace")
     def trace(rules: str = Form(""), stream: str = Form("")) -> Response:

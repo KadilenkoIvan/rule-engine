@@ -12,7 +12,7 @@
     <span class="muted">детектор составных событий умного дома</span>
   </header>
   <main class="layout">
-    <section class="inputs">
+    <section class="inputs" data-session="{{ session }}" data-rules-valid="{{ 'true' if graph is not none else 'false' }}">
       <div class="field">
         <div class="field-head">
           <label for="rules">Правила</label>
@@ -23,6 +23,39 @@
         </div>
         <textarea id="rules" spellcheck="false">{{ rules_text }}</textarea>
       </div>
+      <details class="scenario-editor">
+        <summary>Добавить сценарий</summary>
+        <form id="scenario-form">
+          <fieldset id="scenario-fields">
+            <label for="scenario-name">Название</label>
+            <input id="scenario-name" name="name" required autocomplete="off">
+            <label for="scenario-order">Порядок шагов</label>
+            <select id="scenario-order" name="order">
+              <option value="sequence">По порядку</option>
+              <option value="any">В любом порядке</option>
+            </select>
+            <label for="scenario-patterns">Шаблоны (JSON)</label>
+            <textarea id="scenario-patterns" name="patterns" required spellcheck="false">[["открой", "дверь"]]</textarea>
+            <p class="hint muted">Массив шаблонов; каждый шаблон — массив шагов. Новые токены добавятся в словарь автоматически.</p>
+            <details class="scenario-options">
+              <summary>Пороги и задержки</summary>
+              <div class="scenario-settings">
+                <label for="scenario-gap">Задержка между шагами, с</label>
+                <input id="scenario-gap" name="max_gap" type="number" min="0" step="any" placeholder="Из правил">
+                <label for="scenario-score">Порог токена</label>
+                <input id="scenario-score" name="min_score" type="number" min="0" max="1" step="any" placeholder="Из правил">
+                <label for="scenario-confidence">Общая уверенность</label>
+                <input id="scenario-confidence" name="min_confidence" type="number" min="0" max="1" step="any" placeholder="Из правил">
+                <label for="scenario-cooldown">Пауза после срабатывания, с</label>
+                <input id="scenario-cooldown" name="cooldown" type="number" min="0" step="any" placeholder="0">
+              </div>
+            </details>
+            <button id="add-scenario" type="submit" class="primary">Добавить в правила</button>
+          </fieldset>
+          <p id="scenario-error" class="error" role="alert" hidden></p>
+          <p id="scenario-status" class="hint muted" role="status"></p>
+        </form>
+      </details>
       <div class="field">
         <div class="field-head">
           <label for="stream">Поток</label>

@@ -113,6 +113,31 @@ select, button {
 }
 
 button:hover { border-color: var(--line); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.scenario-editor {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+}
+
+.scenario-editor summary { cursor: pointer; font-weight: 600; }
+.scenario-editor fieldset { border: 0; padding: 0; margin: 10px 0 0; min-width: 0; }
+.scenario-editor label { display: block; margin: 8px 0 4px; }
+.scenario-editor input, .scenario-editor select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.scenario-editor textarea { height: 100px; min-height: 80px; }
+.scenario-options { margin: 12px 0; }
+.scenario-settings { display: grid; grid-template-columns: minmax(0, 1fr) minmax(80px, 110px); gap: 6px 10px; margin-top: 8px; }
+.scenario-settings label { margin: 4px 0; }
+.scenario-editor .error { margin-top: 10px; }
 
 button.primary {
   align-self: flex-start;

@@ -58,3 +58,22 @@ def build_unordered(rules: RuleSet) -> list[Unordered]:
                 Unordered(scenario.name, slots, max_gap, rules.confidence_threshold(scenario))
             )
     return patterns
+
+
+def insert_unordered(
+    patterns: list[Unordered], owners: dict[tuple[tuple[Slot, ...], float], str], rules: RuleSet
+) -> None:
+    """Дописывает наборы новых правил; индекс сохраняет прежнюю проверку одинаковых наборов."""
+    additions = build_unordered(rules)
+    pending = {}
+    for pattern in additions:
+        key = (tuple(sorted(pattern.slots)), pattern.max_gap)
+        if key in owners:
+            raise ValueError(
+                f"сценарии {owners[key]!r} и {pattern.scenario!r} задают один и тот же набор "
+                f"токенов {[slot.token for slot in pattern.slots]} в любом порядке с теми же задержкой "
+                "и порогами"
+            )
+        pending[key] = pattern.scenario
+    patterns.extend(additions)
+    owners.update(pending)
