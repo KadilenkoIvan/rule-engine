@@ -7,7 +7,7 @@
      role="img" aria-label="Граф сценариев">
   <circle class="root" cx="{{ lay.root_x|g }}" cy="{{ lay.root_y|g }}" r="5"/>
   {% for box in lay.boxes %}
-  <g class="edge{% if box.id in state.passed %} passed{% endif %}">
+  <g class="edge{% if box.id in state.missed %} missed{% endif %}{% if box.id in state.passed %} passed{% endif %}">
     <path d="{{ box.path }}"/>
     <text class="label" x="{{ box.label_x|g }}" y="{{ (box.y - 8)|g }}">{{ box.label }}</text>
   </g>
@@ -31,7 +31,7 @@
 <div class="sets">
   <h4>В любом порядке</h4>
   {% for pattern in graph.sets %}
-  <div class="set{% if pattern.id in state.fired_sets %} fired{% endif %}">
+  <div class="set{% if pattern.id in state.missed_sets %} missed{% endif %}{% if pattern.id in state.fired_sets %} fired{% endif %}">
     <span class="slots">
       {% for slot in pattern.slots %}
       <span class="slot">{{ slot.token }}{% if slot.min_score is not none %} ≥ {{ slot.min_score|g }}{% endif %}</span>
@@ -67,6 +67,34 @@
 {% macro title(frame) %}
 <span class="muted">#{{ frame.event.position }}</span> {{ frame.event.token }}
 <span class="muted">{{ frame.event.score|score }} @ {{ frame.event.time|g }}</span>
+{% endmacro %}
+
+{% macro note_list(notes) %}
+<ul>
+  {% for note in notes %}
+  <li class="note {{ note.css }}"><span class="tag">{{ note.tag }}</span> {{ note.text }}{% if note.count > 1 %} <span class="muted">×{{ note.count }}</span>{% endif %}</li>
+  {% endfor %}
+</ul>
+{% endmacro %}
+
+{% macro misses(frame, paths) %}
+{% set notes = paths.notes(frame) %}
+{% if notes.main or notes.skipped %}
+<div class="misses">
+  <h4>Почему не продвинулось</h4>
+  {% if notes.skipped %}
+  <p class="note skip">«{{ frame.event.token }}» никуда не подошёл: его не ждёт ни одно ребро и ни один набор — токен пропущен.</p>
+  {% endif %}
+  {{ note_list(notes.main) }}
+</div>
+{% endif %}
+{# снятые по сроку к токену кадра не относятся: свёрнуты #}
+{% if notes.expired %}
+<details class="expired">
+  <summary>Снято по сроку: {{ notes.expired|length }}</summary>
+  {{ note_list(notes.expired) }}
+</details>
+{% endif %}
 {% endmacro %}
 
 {% macro waiting(frame, paths) %}

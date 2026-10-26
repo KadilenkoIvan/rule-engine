@@ -23,6 +23,7 @@
           {% for match in frame.matches %}<li>{{ m.match(match) }}</li>{% endfor %}
         </ul>
         {% endif %}
+        {{ m.misses(frame, paths) }}
         <div class="canvas">{{ m.svg(lay, state) }}</div>
         {{ m.sets(graph, state, frame) }}
         {{ m.waiting(frame, paths) }}

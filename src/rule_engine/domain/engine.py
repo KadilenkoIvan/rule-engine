@@ -62,6 +62,32 @@ class Waiting(NamedTuple):
     until: float  # секунды: срок продолжения
 
 
+class Miss(NamedTuple):
+    """Почему событие не продвинуло совпадение или не дало сработать сценарию.
+
+    - `"score"`: score токена `got` ниже порога шага `need`. `place` — куда не пустило: вершина
+      за ребром или состояние набора `any`.
+    - `"late"`: токен подошёл бы, но пришёл в `got`, а ждали до `need`. `place` — как у `"score"`.
+    - `"expired"`: совпадение снято: ждали до `need`, а токен в `got` ему не подходил. `place` —
+      где оно стояло.
+    - `"pruned"`: совпадение отсеяно: даже при score 1.0 у оставшихся шагов уверенность не выше
+      `got`, а порог `need`. `place` — куда оно вошло.
+    - `"confidence"`: шаблон сценария собран, но общая уверенность `got` ниже порога `need`.
+    - `"repeat"`: шаблон собран, но его токен уже вошёл в выданное срабатывание сценария.
+    - `"cooldown"`: шаблон собран, но сценарий молчит до `need`.
+
+    `partial` — совпадение, которое не продвинулось; `None` — новое совпадение не началось.
+    У трёх последних причин есть `scenario`, а `place` — `None`.
+    """
+
+    reason: str
+    place: Node | tuple[Unordered, frozenset[int]] | None
+    partial: Partial | None
+    scenario: str | None
+    need: float
+    got: float
+
+
 def dominates(a: Partial, b: Partial) -> bool:
     """`a` вытесняет `b` из вершины: последний шаг у `a` не раньше, а произведение не меньше.
 
@@ -134,6 +160,7 @@ class Engine:
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
         self._position = 0
         self._last_time: float | None = None  # None, пока не пришло ни одного события
+        self._misses: list[Miss] = []  # отказы последнего события
 
     @property
     def active_count(self) -> int:
@@ -154,6 +181,11 @@ class Engine:
     def position(self) -> int:
         """Номер, который получит следующее событие."""
         return self._position
+
+    @property
+    def misses(self) -> list[Miss]:
+        """Почему последнее событие что-то не продвинуло или не дало сработать сценарию."""
+        return self._misses
 
     def snapshot(self) -> list[Waiting]:
         """Все частичные совпадения: в вершинах бора и в наборах `any`."""
@@ -195,6 +227,7 @@ class Engine:
         active: dict[Node, list[Partial]] = {}
         sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
+        misses: list[Miss] = []
 
         def enter(node: Node, partial: Partial) -> None:
             if node.scenario is not None:
@@ -202,6 +235,12 @@ class Engine:
             # ранний отсев; у вершины без продолжений `ahead` пуст, и совпадение в ней не остаётся
             if any(partial.bound(length) >= threshold for length, threshold in node.ahead):
                 keep(active.setdefault(node, []), partial)
+            elif node.ahead:
+                # ближе всего к порогу — шаблон с наибольшим запасом
+                length, threshold = max(
+                    node.ahead, key=lambda item: partial.bound(item[0]) - item[1]
+                )
+                misses.append(Miss("pruned", node, partial, None, threshold, partial.bound(length)))
 
         def collect(pattern: Unordered, filled: frozenset[int], partial: Partial) -> None:
             length = len(pattern.slots)
@@ -209,6 +248,25 @@ class Engine:
                 completed.setdefault(pattern.scenario, []).append(partial)
             elif partial.bound(length) >= pattern.min_confidence:  # ранний отсев
                 keep(sets.setdefault((pattern, filled), []), partial)
+            else:
+                misses.append(
+                    Miss(
+                        "pruned",
+                        (pattern, filled),
+                        partial,
+                        None,
+                        pattern.min_confidence,
+                        partial.bound(length),
+                    )
+                )
+
+        def low_slots(pattern: Unordered, filled: frozenset[int]) -> list[int]:
+            """Открытые шаги набора с токеном события, порог которых событие не прошло."""
+            return [
+                index
+                for index in pattern.free(filled, event.token, 1.0)
+                if event.score < pattern.slots[index].min_score
+            ]
 
         def fire(scenario: str, partials: list[Partial]) -> None:
             taken = self._taken.setdefault(scenario, set())
@@ -219,11 +277,23 @@ class Engine:
                 and taken.isdisjoint(position for position, _ in partial.steps)
             ]
             if not eligible:
-                return  # уверенность ниже порога или повтор: токен уже вошёл в выданное срабатывание
-            fired_at = self._fired_at.get(scenario)
-            if fired_at is not None and event.time - fired_at < self._cooldowns[scenario]:
+                # уверенность ниже порога или повтор: токен уже вошёл в выданное срабатывание
+                threshold = self._min_confidences[scenario]
+                for partial in partials:
+                    if partial.confidence < threshold:
+                        confidence = partial.confidence
+                        misses.append(
+                            Miss("confidence", None, partial, scenario, threshold, confidence)
+                        )
+                    else:
+                        misses.append(Miss("repeat", None, partial, scenario, 0.0, 0.0))
                 return
             best = max(eligible, key=lambda partial: (partial.confidence, partial.steps[0].position))
+            fired_at = self._fired_at.get(scenario)
+            if fired_at is not None and event.time - fired_at < self._cooldowns[scenario]:
+                until = fired_at + self._cooldowns[scenario]
+                misses.append(Miss("cooldown", None, best, scenario, until, event.time))
+                return
             taken.update(position for position, _ in best.steps)
             self._fired_at[scenario] = event.time
             matches.append(Match(scenario, best.steps, best.confidence))
@@ -231,38 +301,72 @@ class Engine:
         for node, partials in self._active.items():
             for partial in partials:
                 # срок считается от последнего шага совпадения, а не от последнего токена потока
-                elapsed = event.time - partial.steps[-1].event.time
-                if all(elapsed > edge.max_gap for edge in node.children):
-                    continue  # сроки всех рёбер из вершины истекли: совпадение снято
-                # копия остаётся в вершине и ждёт другого продолжения
-                keep(active.setdefault(node, []), partial)
+                last = partial.steps[-1].event.time
+                elapsed = event.time - last
+                # сроки всех рёбер из вершины истекли: совпадение снято
+                expired = all(elapsed > edge.max_gap for edge in node.children)
+                if not expired:
+                    # копия остаётся в вершине и ждёт другого продолжения
+                    keep(active.setdefault(node, []), partial)
+                fits = False  # есть ребро с токеном события: снятие объясняет опоздание
                 for edge, child in node.children.items():
-                    if (
-                        edge.token == event.token
-                        and elapsed <= edge.max_gap
-                        and event.score >= edge.min_score
-                    ):
+                    if edge.token != event.token:
+                        continue
+                    fits = True
+                    if elapsed > edge.max_gap:
+                        misses.append(
+                            Miss("late", child, partial, None, last + edge.max_gap, event.time)
+                        )
+                    elif event.score < edge.min_score:
+                        misses.append(
+                            Miss("score", child, partial, None, edge.min_score, event.score)
+                        )
+                    else:
                         enter(child, partial.extend(step))
+                if expired and not fits:
+                    deadline = last + max(edge.max_gap for edge in node.children)
+                    misses.append(Miss("expired", node, partial, None, deadline, event.time))
         for start, child in self._starts.items():
-            if start.token == event.token and event.score >= start.min_score:
+            if start.token != event.token:
+                continue
+            if event.score >= start.min_score:
                 enter(child, Partial((step,), event.score))  # новое совпадение задержку не проверяет
+            else:
+                misses.append(Miss("score", child, None, None, start.min_score, event.score))
         for (pattern, filled), partials in self._sets.items():
             for partial in partials:
-                if event.time - partial.steps[-1].event.time > pattern.max_gap:
-                    continue  # задержка у открытых шагов одна, и она истекла: совпадение снято
+                deadline = partial.steps[-1].event.time + pattern.max_gap
+                if event.time > deadline:
+                    # задержка у открытых шагов одна, и она истекла: совпадение снято
+                    reason = "late" if pattern.free(filled, event.token, 1.0) else "expired"
+                    misses.append(
+                        Miss(reason, (pattern, filled), partial, None, deadline, event.time)
+                    )
+                    continue
                 keep(sets.setdefault((pattern, filled), []), partial)  # копия ждёт другого шага
                 for index in pattern.free(filled, event.token, event.score):
                     collect(pattern, filled | {index}, partial.extend(step))
+                for index in low_slots(pattern, filled):
+                    threshold = pattern.slots[index].min_score
+                    misses.append(
+                        Miss("score", (pattern, filled), partial, None, threshold, event.score)
+                    )
         for pattern in self._unordered:
             # начать набор может любой его шаг
             for index in pattern.free(frozenset(), event.token, event.score):
                 collect(pattern, frozenset({index}), Partial((step,), event.score))
+            for index in low_slots(pattern, frozenset()):
+                threshold = pattern.slots[index].min_score
+                misses.append(
+                    Miss("score", (pattern, frozenset()), None, None, threshold, event.score)
+                )
         # срабатывания выдаются после обхода: из совпадений сценария выбирается самое уверенное
         for scenario, partials in completed.items():
             fire(scenario, partials)
 
         self._active = active
         self._sets = sets
+        self._misses = misses
         # новые срабатывания состоят из позиций не раньше начала самого старого активного
         # совпадения, более ранние можно забыть
         oldest = min(
