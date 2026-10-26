@@ -5,9 +5,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from rule_engine.domain.graph import Node, Start, build_graph
-from rule_engine.domain.rules import RuleSet
-from rule_engine.domain.unordered import Unordered, build_unordered
+from rule_engine.domain.graph import Node, Start, build_graph, insert_scenario
+from rule_engine.domain.rules import RuleSet, Scenario, parse_scenario
+from rule_engine.domain.unordered import Unordered, build_unordered, insert_unordered
 
 
 @dataclass(frozen=True)
@@ -111,6 +111,7 @@ class Engine:
     """Частичные совпадения хранятся между вызовами, поэтому поток можно подавать порциями.
 
     - Токен, не продолжающий частичное совпадение, пропускается: совпадение ждёт дальше.
+      Это относится и к токенам вне словаря: их позиция и время учитываются как обычно.
     - У ребра есть задержка: совпадение продолжается по нему, только если от последнего шага
       совпадения прошло не больше неё. Посторонние токены этот срок не продлевают. Когда сроки
       всех рёбер из вершины истекли, совпадение снимается. Новое совпадение от корня задержку
@@ -143,9 +144,12 @@ class Engine:
       этого сценария прошло меньше его `cooldown`. Невыданное срабатывание не занимает токены
       и не продлевает cooldown, а совпадение живёт дальше.
     - Время событий не убывает: событие раньше предыдущего — ошибка.
+    - `add_scenario` дописывает пути в общий бор. Активные совпадения могут продолжаться по
+      добавленным веткам.
     """
 
     def __init__(self, rules: RuleSet) -> None:
+        self._defaults = rules  # стандартные задержка и пороги не меняются
         self._vocabulary = rules.vocabulary
         self._cooldowns = {scenario.name: scenario.cooldown for scenario in rules.scenarios}
         self._min_confidences = {
@@ -153,6 +157,10 @@ class Engine:
         }
         self._starts = build_graph(rules)
         self._unordered = build_unordered(rules)
+        self._unordered_owners = {
+            (tuple(sorted(pattern.slots)), pattern.max_gap): pattern.scenario
+            for pattern in self._unordered
+        }
         self._active: dict[Node, list[Partial]] = {}  # вершина → несравнимые совпадения в ней
         # (шаблон `any`, номера закрытых шагов) → несравнимые совпадения в этом состоянии
         self._sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
@@ -161,6 +169,43 @@ class Engine:
         self._position = 0
         self._last_time: float | None = None  # None, пока не пришло ни одного события
         self._misses: list[Miss] = []  # отказы последнего события
+
+    def add_scenario(self, scenario: Scenario | dict) -> None:
+        """Добавляет сценарий без перестроения графа и сброса текущих совпадений.
+
+        Принимает `Scenario` или словарь в формате элемента `scenarios` из JSON. Проверяются
+        только новые шаблоны; их токены добавляются в словарь после успешной вставки.
+        Сохранившиеся префиксы доступны новому сценарию. События не переигрываются;
+        снятые совпадения не восстанавливаются.
+        Вызывать между `push`/`feed`; одновременные вызовы из разных потоков не поддерживаются.
+        """
+        if isinstance(scenario, dict):
+            scenario = parse_scenario(scenario)
+        if scenario.name in self._cooldowns:
+            raise ValueError(f"сценарий {scenario.name!r} объявлен дважды")
+        new_tokens = {
+            step.token for pattern in scenario.patterns for step in pattern
+        } - self._vocabulary
+        vocabulary = self._vocabulary | new_tokens if new_tokens else self._vocabulary
+        rules = RuleSet(
+            vocabulary,
+            (scenario,),
+            self._defaults.max_gap,
+            self._defaults.min_score,
+            self._defaults.min_confidence,
+        )
+        if scenario.order == "sequence":
+            insert_scenario(self._starts, rules, scenario)
+        else:
+            insert_unordered(self._unordered, self._unordered_owners, rules)
+        self._cooldowns[scenario.name] = scenario.cooldown
+        self._min_confidences[scenario.name] = rules.confidence_threshold(scenario)
+        self._vocabulary = vocabulary
+
+    @property
+    def vocabulary(self) -> frozenset[str]:
+        """Текущий словарь, включая токены успешно добавленных сценариев."""
+        return self._vocabulary
 
     @property
     def active_count(self) -> int:
@@ -213,8 +258,6 @@ class Engine:
         return matches
 
     def push(self, event: Event) -> list[Match]:
-        if event.token not in self._vocabulary:
-            raise ValueError(f"токена {event.token!r} нет в словаре")
         if self._last_time is not None and event.time < self._last_time:
             raise ValueError(
                 f"время {event.time} токена {event.token!r} раньше предыдущего {self._last_time}"

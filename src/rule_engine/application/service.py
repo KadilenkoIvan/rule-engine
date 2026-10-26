@@ -38,7 +38,35 @@ class Index(NamedTuple):
     sets: dict[Unordered, int]
 
 
+class RuleEditor:
+    """Набор правил с готовым движком: новые сценарии дописываются в его граф."""
+
+    def __init__(self, rules_text: str) -> None:
+        self._document = json.loads(rules_text)
+        self._rules = RuleSet.from_dict(self._document)
+        self._engine = Engine(self._rules)
+
+    @property
+    def rules_text(self) -> str:
+        return json.dumps(self._document, ensure_ascii=False, indent=2)
+
+    def graph(self) -> GraphView:
+        return describe(self._engine, self._rules)[0]
+
+    def add_scenario(self, scenario_text: str) -> None:
+        scenario = json.loads(scenario_text)
+        if not isinstance(scenario, dict):
+            raise ValueError("сценарий должен быть объектом JSON")
+        vocabulary = self._engine.vocabulary
+        self._engine.add_scenario(scenario)
+        self._document["scenarios"].append(scenario)
+        self._document["vocabulary"].extend(sorted(self._engine.vocabulary - vocabulary))
+
+
 class RuleEngineService:
+    def editor(self, rules_text: str) -> RuleEditor:
+        return RuleEditor(rules_text)
+
     def graph(self, rules_text: str) -> GraphView:
         rules = parse_rules(rules_text)
         return describe(Engine(rules), rules)[0]
@@ -99,7 +127,7 @@ def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
         )
         for pattern in engine.unordered
     )
-    graph = GraphView(roots, set_views, tuple(sorted(rules.vocabulary)))
+    graph = GraphView(roots, set_views, tuple(sorted(engine.vocabulary)))
     return graph, Index(nodes, sets)
 
 
