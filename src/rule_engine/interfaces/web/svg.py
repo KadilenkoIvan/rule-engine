@@ -7,6 +7,7 @@
 
 from typing import NamedTuple
 
+from rule_engine.application.tokens import token_label
 from rule_engine.application.views import GraphView, NodeView, SilenceEdge, TokenEdge
 
 CHAR = 7.9  # ширина знака моноширинного шрифта 13 px
@@ -42,15 +43,17 @@ def label(edge: TokenEdge | SilenceEdge) -> str:
     """Подпись ребра. Задержка и порог — там, где отличаются от корня."""
     if isinstance(edge, SilenceEdge):
         notes = [f"{edge.duration:g} с"]
+        if edge.before:
+            notes.append(f"назад {edge.before:g} с")
         if edge.min_score is not None:
             notes.append(f"≥ {edge.min_score:g}")
-        return " · ".join([f"тишина: {', '.join(edge.tokens)}", *notes])
+        return " · ".join([f"тишина: {', '.join(map(token_label, edge.tokens))}", *notes])
     notes = []
     if edge.max_gap is not None:
         notes.append(f"{edge.max_gap:g} с")
     if edge.min_score is not None:
         notes.append(f"≥ {edge.min_score:g}")
-    return " · ".join([edge.token, *notes])
+    return " · ".join([token_label(edge.token), *notes])
 
 
 def layout(graph: GraphView) -> Layout:

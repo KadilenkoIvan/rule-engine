@@ -36,7 +36,7 @@
             </select>
             <label for="scenario-patterns">Шаблоны (JSON)</label>
             <textarea id="scenario-patterns" name="patterns" required spellcheck="false">[["открой", "дверь"]]</textarea>
-            <p class="hint muted">Массив шаблонов; каждый шаблон — массив шагов. Шаг-тишина: <code>{"absent": [токены], "for": секунды}</code>. Новые токены добавятся в словарь автоматически.</p>
+            <p class="hint muted">Массив шаблонов; каждый шаблон — массив шагов. Шаг-тишина: <code>{"absent": [токены], "for": секунды, "before": секунды}</code>. Токен <code>any</code> — любой, <code>any_vac</code> — любой из словаря. Новые токены добавятся в словарь автоматически.</p>
             <details class="scenario-options">
               <summary>Пороги и задержки</summary>
               <div class="scenario-settings">

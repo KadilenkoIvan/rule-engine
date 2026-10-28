@@ -13,9 +13,17 @@ from rule_engine.domain.graph import (
     Start,
     build_graph,
     insert_scenario,
-    longest_silence,
+    longest_before,
 )
-from rule_engine.domain.rules import RuleSet, Scenario, SilenceStep, parse_scenario, step_tokens
+from rule_engine.domain.rules import (
+    WILDCARDS,
+    RuleSet,
+    Scenario,
+    SilenceStep,
+    fits,
+    parse_scenario,
+    step_tokens,
+)
 from rule_engine.domain.timer_wheel import Timer, TimerWheel
 from rule_engine.domain.unordered import Unordered, build_unordered, insert_unordered
 
@@ -143,11 +151,11 @@ def keep(partials: list[Partial], partial: Partial) -> None:
     partials.append(partial)
 
 
-def silences_of(scenario: Scenario) -> float:
-    """Самое длинное окно тишины сценария; 0, если тишины нет."""
+def before_of(scenario: Scenario) -> float:
+    """Самое длинное окно тишины назад у сценария; 0, если назад не смотрит ни одна тишина."""
     return max(
         (
-            step.duration
+            step.before
             for pattern in scenario.patterns
             for step in pattern
             if isinstance(step, SilenceStep)
@@ -185,9 +193,13 @@ class Engine:
       укладывается в задержку от последнего шага. `<дверь> <шаги>` и `<шаги> <дверь>` дают одно
       состояние `{<дверь>, <шаги>}`. Копия, вытеснение и ранний отсев — как в вершине бора;
       совпадение снимается, когда его задержка истекла.
+    - Токен шага `any` подходит к любому токену события, в словаре он или нет; `any_vac` — к
+      любому токену текущего словаря. Это верно везде: в бору, в наборах `any` и в запретах
+      тишины.
     - Ребро-тишина: совпадение, вошедшее в вершину в момент t, открывает окно до t + `for`.
-      Срок окна ставится в колесо таймеров. Запрещённый токен со score не ниже порога в окне —
-      и событием до t, не раньше t − `for`, — нарушает тишину. Окно, прошедшее без него,
+      Срок окна ставится в колесо таймеров. Запрещённый токен со score не ниже порога в окне
+      нарушает тишину. Если у тишины `before` > 0, её нарушает и событие до t, не раньше
+      t − `before`, кроме шагов самого совпадения. Окно, прошедшее без запрещённого токена,
       закрывается, когда время станет больше t + `for`: от события или из `advance`. Тогда
       совпадение идёт за ребро, и временем его последнего шага считается t + `for`. Вытеснения
       в окнах нет: окна сдвинуты, и токен может нарушить одно, не задев другое.
@@ -224,8 +236,8 @@ class Engine:
         self._sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         self._wheel: TimerWheel[Hush] = TimerWheel()  # сроки окон тишины
         self._hushes: dict[Timer[Hush], None] = {}  # открытые окна в порядке открытия
-        self._longest = longest_silence(self._starts)  # секунды: самое длинное окно тишины
-        self._recent: deque[Step] = deque()  # события не старше `_longest`: для тишины до шага
+        self._lookback = longest_before(self._starts)  # секунды: самое длинное окно назад
+        self._recent: deque[Step] = deque()  # события не старше `_lookback`: для тишины до шага
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
         self._position = 0
@@ -250,7 +262,7 @@ class Engine:
             for pattern in scenario.patterns
             for step in pattern
             for token in step_tokens(step)
-        } - self._vocabulary
+        } - self._vocabulary - WILDCARDS
         vocabulary = self._vocabulary | new_tokens if new_tokens else self._vocabulary
         rules = RuleSet(
             vocabulary,
@@ -266,7 +278,7 @@ class Engine:
         self._cooldowns[scenario.name] = scenario.cooldown
         self._min_confidences[scenario.name] = rules.confidence_threshold(scenario)
         self._vocabulary = vocabulary
-        self._longest = max(self._longest, silences_of(scenario))
+        self._lookback = max(self._lookback, before_of(scenario))
 
     @property
     def vocabulary(self) -> frozenset[str]:
@@ -377,14 +389,14 @@ class Engine:
             """Открытые шаги набора с токеном события, порог которых событие не прошло."""
             return [
                 index
-                for index in pattern.free(filled, event.token, 1.0)
+                for index in pattern.free(filled, event.token, 1.0, self._vocabulary)
                 if event.score < pattern.slots[index].min_score
             ]
 
         # нарушенная тишина: истёкшие окна закрыты выше, поэтому оставшиеся ещё идут
         for timer in list(self._hushes):
             window, partial = timer.payload
-            if event.token in window.edge.tokens and event.score >= window.edge.min_score:
+            if self._breaks(window.edge, event):
                 self._wheel.cancel(timer)
                 del self._hushes[timer]
                 misses.append(Miss("silence", window, partial, None, timer.deadline, event.time))
@@ -398,11 +410,11 @@ class Engine:
                 if not expired:
                     # копия остаётся в вершине и ждёт другого продолжения
                     keep(active.setdefault(node, []), partial)
-                fits = False  # есть ребро с токеном события: снятие объясняет опоздание
+                matched = False  # есть ребро с токеном события: снятие объясняет опоздание
                 for edge, child in node.children.items():
-                    if edge.token != event.token:
+                    if not fits(edge.token, event.token, self._vocabulary):
                         continue
-                    fits = True
+                    matched = True
                     if elapsed > edge.max_gap:
                         misses.append(
                             Miss("late", child, partial, None, last + edge.max_gap, event.time)
@@ -413,11 +425,11 @@ class Engine:
                         )
                     else:
                         self._enter(child, partial.extend(step), active, completed)
-                if expired and not fits:
+                if expired and not matched:
                     deadline = last + max(edge.max_gap for edge in node.children)
                     misses.append(Miss("expired", node, partial, None, deadline, event.time))
         for start, child in self._starts.items():
-            if start.token != event.token:
+            if not fits(start.token, event.token, self._vocabulary):
                 continue
             if event.score >= start.min_score:
                 # новое совпадение задержку не проверяет
@@ -429,13 +441,14 @@ class Engine:
                 deadline = partial.last + pattern.max_gap
                 if event.time > deadline:
                     # задержка у открытых шагов одна, и она истекла: совпадение снято
-                    reason = "late" if pattern.free(filled, event.token, 1.0) else "expired"
+                    fitting = pattern.free(filled, event.token, 1.0, self._vocabulary)
+                    reason = "late" if fitting else "expired"
                     misses.append(
                         Miss(reason, (pattern, filled), partial, None, deadline, event.time)
                     )
                     continue
                 keep(sets.setdefault((pattern, filled), []), partial)  # копия ждёт другого шага
-                for index in pattern.free(filled, event.token, event.score):
+                for index in pattern.free(filled, event.token, event.score, self._vocabulary):
                     collect(pattern, filled | {index}, partial.extend(step))
                 for index in low_slots(pattern, filled):
                     threshold = pattern.slots[index].min_score
@@ -444,7 +457,7 @@ class Engine:
                     )
         for pattern in self._unordered:
             # начать набор может любой его шаг
-            for index in pattern.free(frozenset(), event.token, event.score):
+            for index in pattern.free(frozenset(), event.token, event.score, self._vocabulary):
                 collect(pattern, frozenset({index}), Partial((step,), event.score, event.time))
             for index in low_slots(pattern, frozenset()):
                 threshold = pattern.slots[index].min_score
@@ -457,7 +470,7 @@ class Engine:
         self._active = active
         self._sets = sets
         self._recent.append(step)
-        while self._recent and self._recent[0].event.time < event.time - self._longest:
+        while self._recent and self._recent[0].event.time < event.time - self._lookback:
             self._recent.popleft()
         self._forget()
         return matches
@@ -505,21 +518,30 @@ class Engine:
             )
 
     def _open(self, window: Window, partial: Partial) -> None:
-        """Открывает окно тишины, если запрещённого токена не было и незадолго до шага."""
+        """Открывает окно тишины, если запрещённого токена не было и `before` секунд до шага."""
         edge = window.edge
         deadline = partial.last + edge.duration
-        # в `_recent` только события раньше текущего: само событие шага тишину не нарушает
-        for step in self._recent:
-            event = step.event
-            if (
-                event.time >= partial.last - edge.duration
-                and event.token in edge.tokens
-                and event.score >= edge.min_score
-            ):
-                self._misses.append(Miss("silence", window, partial, None, deadline, event.time))
-                return
+        if edge.before > 0:
+            own = {position for position, _ in partial.steps}
+            # в `_recent` только события раньше текущего: само событие шага тишину не нарушает,
+            # прежние шаги совпадения — тоже
+            for step in self._recent:
+                if (
+                    step.event.time >= partial.last - edge.before
+                    and step.position not in own
+                    and self._breaks(edge, step.event)
+                ):
+                    miss = Miss("silence", window, partial, None, deadline, step.event.time)
+                    self._misses.append(miss)
+                    return
         timer = self._wheel.schedule(deadline, Hush(window, partial))
         self._hushes[timer] = None
+
+    def _breaks(self, edge: Silence, event: Event) -> bool:
+        """Нарушает ли событие тишину: запрещённый токен со score не ниже порога."""
+        return event.score >= edge.min_score and any(
+            fits(token, event.token, self._vocabulary) for token in edge.tokens
+        )
 
     def _finish(self, completed: dict[str, list[Partial]], time: float) -> list[Match]:
         matches = []
@@ -562,16 +584,18 @@ class Engine:
     def _forget(self) -> None:
         """Новые срабатывания состоят из позиций не раньше начала самого старого активного
         совпадения, более ранние можно забыть."""
+        # один `min` по всем местам: `default` второго `min` не учёл бы совпадения в вершинах и
+        # наборах, когда открыто хоть одно окно
         oldest = min(
             (
-                partial.steps[0].position
-                for partials in (*self._active.values(), *self._sets.values())
-                for partial in partials
+                *(
+                    partial.steps[0].position
+                    for partials in (*self._active.values(), *self._sets.values())
+                    for partial in partials
+                ),
+                *(timer.payload.partial.steps[0].position for timer in self._hushes),
             ),
             default=self._position,
-        )
-        oldest = min(
-            (timer.payload.partial.steps[0].position for timer in self._hushes), default=oldest
         )
         for taken in self._taken.values():
             taken.difference_update([position for position in taken if position < oldest])

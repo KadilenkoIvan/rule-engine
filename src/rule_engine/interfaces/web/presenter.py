@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from rule_engine.application.tokens import fits, token_label
 from rule_engine.application.views import (
     Frame,
     GraphView,
@@ -66,6 +67,28 @@ class Notes(NamedTuple):
     skipped: bool  # токен никуда не подошёл и ни в чём не отказан
 
 
+def covers(slots: tuple[str, ...], tokens: tuple[str, ...], vocabulary: frozenset[str]) -> bool:
+    """Можно ли раздать токены шагам набора по одному, чтобы каждый подошёл к своему шагу.
+
+    Паросочетание Куна: `any` подходит к любому токену, поэтому простого сравнения
+    отсортированных списков мало.
+    """
+    if len(slots) != len(tokens):
+        return False
+    owner: dict[int, int] = {}  # шаг → токен
+
+    def place(token: int, seen: set[int]) -> bool:
+        for slot, wanted in enumerate(slots):
+            if slot not in seen and fits(wanted, tokens[token], vocabulary):
+                seen.add(slot)
+                if slot not in owner or place(owner[slot], seen):
+                    owner[slot] = token
+                    return True
+        return False
+
+    return all(place(token, set()) for token in range(len(tokens)))
+
+
 class Paths:
     """Пути от корня до вершин графа: по ним подсвечиваются рёбра и ищется место срабатывания."""
 
@@ -85,7 +108,7 @@ class Paths:
                 self.labels[node.id] = (*labels, f"тишина {node.edge.duration:g} с")
             else:
                 self.tokens[node.id] = (*tokens, node.edge.token)
-                self.labels[node.id] = (*labels, node.edge.token)
+                self.labels[node.id] = (*labels, token_label(node.edge.token))
             self.nodes[node.id] = node
             for child in node.children:
                 walk(child, node.id)
@@ -102,21 +125,25 @@ class Paths:
         return found
 
     def places(self, match: MatchView) -> tuple[set[int], set[int]]:
-        """Вершины и наборы, где мог закончиться шаблон срабатывания: тот же сценарий, те же токены.
+        """Вершины и наборы, где мог закончиться шаблон срабатывания: тот же сценарий, токены
+        подходят к шагам (`any` — к любому).
 
         Движок не говорит, каким шаблоном сработал сценарий, поэтому место ищется по шагам.
         """
         tokens = tuple(step.token for step in match.steps)
+        vocabulary = frozenset(self.graph.vocabulary)
         nodes = {
             node
             for node, path in self.tokens.items()
-            if self.nodes[node].scenario == match.scenario and path == tokens
+            if self.nodes[node].scenario == match.scenario
+            and len(path) == len(tokens)
+            and all(fits(wanted, token, vocabulary) for wanted, token in zip(path, tokens))
         }
         sets = {
             pattern.id
             for pattern in self.graph.sets
             if pattern.scenario == match.scenario
-            and sorted(slot.token for slot in pattern.slots) == sorted(tokens)
+            and covers(tuple(slot.token for slot in pattern.slots), tokens, vocabulary)
         }
         return nodes, sets
 
@@ -148,7 +175,7 @@ class Paths:
 
     def set_name(self, place: int) -> str:
         pattern = self.graph.sets[place]
-        return f"{{{', '.join(slot.token for slot in pattern.slots)}}} «{pattern.scenario}»"
+        return f"{{{', '.join(token_label(slot.token) for slot in pattern.slots)}}} «{pattern.scenario}»"
 
     def explain(self, miss: MissView, token: str | None) -> str:
         """Отказ словами: что не продвинулось, и с чем сравнили."""
@@ -232,7 +259,7 @@ class Paths:
         """Где стоит совпадение: путь по рёбрам или набор `any`."""
         if item.kind == "set":
             pattern = self.graph.sets[item.place]
-            return f"{{{', '.join(slot.token for slot in pattern.slots)}}} → {pattern.scenario}"
+            return f"{{{', '.join(token_label(slot.token) for slot in pattern.slots)}}} → {pattern.scenario}"
         return " → ".join(self.labels[item.place])
 
 
