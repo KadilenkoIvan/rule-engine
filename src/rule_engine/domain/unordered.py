@@ -18,21 +18,21 @@ class Unordered(NamedTuple):
     max_gap: float  # секунды между соседними по времени шагами
     min_confidence: float  # порог общей уверенности сценария
 
-    def free(self, filled: frozenset[int], token: str, score: float) -> list[int]:
-        """Номера шагов, которые событие может закрыть, если шаги `filled` уже закрыты.
+    def groups(self) -> dict[str, list[tuple[float, int]]]:
+        """Токен → (порог, маска номеров) для групп одинаковых шагов.
 
         Каждый шаг забирает своё событие, поэтому `[<шаги>, <шаги>]` ждёт два разных `<шаги>`.
         Из одинаковых шагов закрывается первый незакрытый: иначе одно и то же совпадение стояло
-        бы в двух состояниях, {первый <шаги>} и {второй <шаги>}.
+        бы в двух состояниях, {первый <шаги>} и {второй <шаги>}. Поэтому группе хватает маски:
+        шаг, который закроет событие, — младший бит `маска & ~закрытые`.
         """
-        return [
-            index
-            for index, slot in enumerate(self.slots)
-            if index not in filled
-            and slot.token == token
-            and score >= slot.min_score
-            and all(earlier in filled for earlier in range(index) if self.slots[earlier] == slot)
-        ]
+        masks: dict[Slot, int] = {}
+        for index, slot in enumerate(self.slots):
+            masks[slot] = masks.get(slot, 0) | 1 << index
+        groups: dict[str, list[tuple[float, int]]] = {}
+        for slot, mask in masks.items():
+            groups.setdefault(slot.token, []).append((slot.min_score, mask))
+        return groups
 
 
 def build_unordered(rules: RuleSet) -> list[Unordered]:

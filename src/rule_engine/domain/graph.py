@@ -3,6 +3,7 @@
 В граф входят сценарии с `order: "sequence"`; шаблоны `any` собирает unordered.py.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -33,6 +34,10 @@ class Node:
     # (длина шаблона, порог общей уверенности его сценария) для шаблонов, которые кончаются ниже
     # вершины: по ним движок снимает совпадение, которое не дотянет ни до одного порога
     ahead: set[tuple[int, float]] = field(default_factory=set)
+    max_gap: float = 0.0  # наибольшая задержка рёбер: позже неё совпадению некуда продолжиться
+    # `product ** (1 / L) >= threshold` для какого-то шаблона из `ahead` равносильно
+    # `product >= threshold ** L`, поэтому для раннего отсева хватает минимума по `ahead`
+    floor: float = math.inf
 
 
 def build_graph(rules: RuleSet) -> dict[Start, Node]:
@@ -47,13 +52,17 @@ def build_graph(rules: RuleSet) -> dict[Start, Node]:
     return starts
 
 
-def insert_scenario(starts: dict[Start, Node], rules: RuleSet, scenario: Scenario) -> None:
+def insert_scenario(
+    starts: dict[Start, Node], rules: RuleSet, scenario: Scenario
+) -> list[tuple[Node | None, Start | Edge, Node]]:
     """Дописывает пути проверенного сценария, сохраняя общие вершины.
 
-    Конфликты полных шаблонов проверяются до изменения бора, по прежним правилам.
+    Конфликты полных шаблонов проверяются до изменения бора, по прежним правилам. Возвращает
+    созданные рёбра: (откуда, ребро, куда); у рёбер из корня «откуда» — None.
     """
+    created: list[tuple[Node | None, Start | Edge, Node]] = []
     if scenario.order != "sequence":
-        return
+        return created
     paths: list[tuple[Start, tuple[Edge, ...]]] = []
     for first, *rest in scenario.patterns:
         start = Start(first.token, rules.threshold(scenario, first))
@@ -78,16 +87,21 @@ def insert_scenario(starts: dict[Start, Node], rules: RuleSet, scenario: Scenari
     for start, edges in paths:
         if start not in starts:
             starts[start] = Node()
+            created.append((None, start, starts[start]))
         node = starts[start]
         nodes = [node]
         for edge in edges:
             if edge not in node.children:
                 node.children[edge] = Node()
+                node.max_gap = max(node.max_gap, edge.max_gap)
+                created.append((node, edge, node.children[edge]))
             node = node.children[edge]
             nodes.append(node)
         node.scenario = scenario.name
         for above in nodes[:-1]:
             above.ahead.add((len(nodes), threshold))
+            above.floor = min(above.floor, threshold ** len(nodes))
+    return created
 
 
 def graph_size(starts: dict[Start, Node]) -> int:
