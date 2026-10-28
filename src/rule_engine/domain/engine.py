@@ -237,14 +237,14 @@ class Front:
 
         Вытеснить новое может только последнее: лишь у него последний шаг может быть тем же.
         """
-        items = self.items
-        if len(self) and dominates(items[-1], partial):
+        items, head = self.items, self.head
+        if len(items) > head and dominates(items[-1], partial):
             return 0
-        size = len(self)
-        while len(self) and dominates(partial, items[-1]):
+        size = len(items)
+        while len(items) > head and dominates(partial, items[-1]):
             items.pop()
         items.append(partial)
-        return len(self) - size
+        return len(items) - size
 
     def pop_first(self) -> Partial:
         partial = self.items[self.head]
@@ -270,16 +270,22 @@ class Collector:
         self.full = (1 << len(pattern.slots)) - 1  # маска собранного шаблона
         self.states: dict[int, Front] = {}  # маска закрытых шагов → совпадения, без пустых
 
-    def free(self, filled: int, token: str, score: float, vocabulary: frozenset[str]) -> list[int]:
-        """`Unordered.free` на масках: номера шагов, которые событие может закрыть."""
-        free = []
-        for key in fitting(token, vocabulary):
-            for min_score, mask in self.groups.get(key, ()):
-                open_ = mask & ~filled
-                if open_ and score >= min_score:
-                    free.append((open_ & -open_).bit_length() - 1)
-        free.sort()
-        return free
+    def fitting(self, token: str, vocabulary: frozenset[str]) -> list[tuple[float, int]]:
+        """Группы шагов, к которым подходит токен события: одни на все состояния набора."""
+        return [group for key in fitting(token, vocabulary) for group in self.groups.get(key, ())]
+
+    def closes(
+        self, filled: int, groups: list[tuple[float, int]], score: float
+    ) -> tuple[list[int], list[int]]:
+        """`Unordered.free` на масках: шаги, которые событие закроет, и открытые шаги с его
+        токеном, порог которых оно не прошло."""
+        free, low = [], []
+        for min_score, mask in groups:
+            open_ = mask & ~filled
+            if open_:
+                index = (open_ & -open_).bit_length() - 1
+                (free if score >= min_score else low).append(index)
+        return free, low
 
     def place(self, filled: int) -> tuple[Unordered, frozenset[int]]:
         """Состояние так, как его видят снимок и отказы: шаблон и номера закрытых шагов."""
@@ -426,6 +432,8 @@ class Engine:
         self._lookback = longest_before(self._starts)  # секунды: самое длинное окно назад
         self._recent: deque[Step] = deque()  # события не старше `_lookback`: для тишины до шага
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
+        self._taken_count = 0  # сколько позиций во всех `_taken`
+        self._idle = 0  # вызовы `push` и `advance` с последней чистки `_taken`
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
         self._position = 0
         self._last_time: float | None = None  # None, пока время не задано событием или advance
@@ -566,7 +574,7 @@ class Engine:
         self._move(time, f"время {time}")
         self._misses = []
         matches = self._close(time)
-        self._forget()
+        self._tick()
         return matches
 
     def push(self, event: Event) -> list[Match]:
@@ -621,7 +629,7 @@ class Engine:
         self._recent.append(step)
         while self._recent and self._recent[0].event.time < event.time - self._lookback:
             self._recent.popleft()
-        self._forget()
+        self._tick()
         return matches
 
     def _move(self, time: float, what: str) -> None:
@@ -689,10 +697,13 @@ class Engine:
             else:
                 collector, filled = place
                 gap = collector.pattern.max_gap
-                # задержка у открытых шагов одна: «опоздал», если событие закрыло бы шаг
-                late = collector.free(filled, event.token, 1.0, self._vocabulary)
-                reason = "late" if late else "expired"
+                reason = None
                 while len(front) and now > front.first().last_time + gap:
+                    if reason is None:
+                        # задержка у открытых шагов одна: «опоздал», если событие закрыло бы шаг
+                        groups = collector.fitting(event.token, self._vocabulary)
+                        late = any(mask & ~filled for _, mask in groups)
+                        reason = "late" if late else "expired"
                     partial = front.pop_first()
                     deadline = partial.last_time + gap
                     self._misses.append(
@@ -816,26 +827,21 @@ class Engine:
             if end > start:
                 entries.append(((collector, target), best(items, start, end, step)))
 
-        def low_slots(filled: int) -> list[int]:
-            """Открытые шаги набора с токеном события, порог которых событие не прошло."""
-            return [
-                index
-                for index in collector.free(filled, event.token, 1.0, self._vocabulary)
-                if event.score < pattern.slots[index].min_score
-            ]
-
+        groups = collector.fitting(event.token, self._vocabulary)
         # снятые по сроку уже ушли, а задержка у шагов набора одна: подходят все
         for filled, front in collector.states.items():
-            for index in collector.free(filled, event.token, event.score, self._vocabulary):
+            free, low = collector.closes(filled, groups, event.score)
+            for index in free:
                 gather(filled | 1 << index, front.items, front.head)
-            for index in low_slots(filled):
+            for index in low:
                 need = pattern.slots[index].min_score
                 place = collector.place(filled)
                 self._misses += [
                     Miss("score", place, partial, None, need, event.score) for partial in front
                 ]
         # начать набор может любой его шаг
-        for index in collector.free(0, event.token, event.score, self._vocabulary):
+        free, low = collector.closes(0, groups, event.score)
+        for index in free:
             partial = Partial.begin(step)
             target = 1 << index
             if target == collector.full:
@@ -847,7 +853,7 @@ class Engine:
                     Miss("pruned", collector.place(target), partial, None, threshold,
                          partial.bound(length))
                 )
-        for index in low_slots(0):
+        for index in low:
             need = pattern.slots[index].min_score
             self._misses.append(Miss("score", collector.place(0), None, None, need, event.score))
 
@@ -948,12 +954,24 @@ class Engine:
             self._misses.append(Miss("cooldown", None, best, scenario, until, time))
             return None
         taken.update(step.position for step in best.backwards())
+        self._taken_count += best.count  # позиции новые: проверено выше
         self._fired_at[scenario] = time
         return Match(scenario, best.steps, best.confidence)
 
+    def _tick(self) -> None:
+        """Чистит `_taken`, когда с прошлой чистки прошло не меньше вызовов, чем кандидатов и
+        запомненных позиций: чистка обходит всех, а так она в среднем O(1) на вызов."""
+        self._idle += 1
+        if self._idle >= self._active_count + self._taken_count:
+            self._forget()
+
     def _forget(self) -> None:
         """Новые срабатывания состоят из позиций не раньше начала самого старого активного
-        совпадения, более ранние можно забыть."""
+        совпадения, более ранние можно забыть.
+
+        Лишние позиции не мешают: их нет ни в живых совпадениях, ни в будущих событиях,
+        поэтому чистить можно реже, чем на каждом событии.
+        """
         # один `min` по всем местам: `default` второго `min` не учёл бы совпадения в вершинах и
         # наборах, когда открыто хоть одно окно
         fronts = [
@@ -967,5 +985,11 @@ class Engine:
             ),
             default=self._position,
         )
-        for taken in self._taken.values():
-            taken.difference_update([position for position in taken if position < oldest])
+        # пустые множества уходят: иначе чистка обходила бы всех когда-либо сработавших
+        self._taken = {
+            scenario: kept
+            for scenario, taken in self._taken.items()
+            if (kept := {position for position in taken if position >= oldest})
+        }
+        self._taken_count = sum(map(len, self._taken.values()))
+        self._idle = 0
