@@ -150,15 +150,14 @@ def run(engine, operation):
         return "error", str(error)
 
 
-@pytest.mark.parametrize("seed", range(40))
-def test_engine_matches_full_traversal_reference(seed):
+def compare(seed, scenarios, operations, steps):
     rng = random.Random(seed)
-    rules = random_rules(rng)
+    rules = random_rules(rng, scenarios)
     engine, reference = Engine(rules), ReferenceEngine(rules)
     stream = list(STREAM)
     now, added = 0.0, 0
-    for step in range(200):
-        now += rng.choice([0.0, 0.0, 0.25, 0.5, 1.0, 2.0, 5.0])
+    for step in range(operations):
+        now += rng.choice(steps)
         kind = rng.random()
         if kind < 0.05:
             extra = [f"new{added}"] if rng.random() < 0.5 else []
@@ -179,3 +178,14 @@ def test_engine_matches_full_traversal_reference(seed):
         left, right = run(engine, operation), run(reference, operation)
         assert left == right, (seed, step)
         assert state(engine) == state(reference), (seed, step)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_engine_matches_full_traversal_reference(seed):
+    compare(seed, 7, 200, [0.0, 0.0, 0.25, 0.5, 1.0, 2.0, 5.0])
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_dense_stream_matches_full_traversal_reference(seed):
+    # много сценариев и мелкий шаг времени: длинные фронты и много окон сразу
+    compare(1000 + seed, 12, 400, [0.0, 0.0, 0.05, 0.1, 0.25])
