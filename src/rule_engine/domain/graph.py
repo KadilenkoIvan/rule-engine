@@ -34,35 +34,35 @@ class Silence(NamedTuple):
 
 
 class Targets:
-    """Завершения шаблонов ниже позиции: (длина шаблона, порог общей уверенности сценария).
+    """Завершения шаблонов ниже позиции: для каждой длины шаблона — наименьший порог общей
+    уверенности среди шаблонов этой длины.
 
     По ним движок снимает совпадение, которое не дотянет ни до одного порога (ранний отсев).
-    Неравенство `product ** (1 / L) >= порог` для завершений одной длины L выполнено хоть для
-    одного, только если выполнено для наименьшего порога, поэтому отсев проверяет один порог на
-    длину той же формулой.
+    Неравенство `product ** (1 / L) >= порог` для шаблонов одной длины L выполнено хоть для
+    одного, только если выполнено для наименьшего порога, поэтому хватает пары на длину, а
+    отсев проверяет её той же формулой. Ближе всего к порогу (отчёт об отсеве) тоже шаблон с
+    наименьшим порогом своей длины.
     """
 
-    __slots__ = ("items", "lowest")
+    __slots__ = ("lowest",)
 
     def __init__(self) -> None:
-        self.items: set[tuple[int, float]] = set()
-        self.lowest: dict[int, float] = {}  # длина шаблона → наименьший порог среди шаблонов этой длины
+        self.lowest: dict[int, float] = {}  # длина шаблона → наименьший порог
 
     def add(self, target: tuple[int, float]) -> None:
-        self.items.add(target)
         length, threshold = target
         if threshold < self.lowest.get(length, math.inf):
             self.lowest[length] = threshold
 
     def update(self, other: "Targets") -> None:
-        for target in other.items:
+        for target in other:
             self.add(target)
 
     def __iter__(self) -> Iterator[tuple[int, float]]:
-        return iter(self.items)
+        return iter(self.lowest.items())
 
     def __len__(self) -> int:
-        return len(self.items)
+        return len(self.lowest)
 
     def reaches(self, product: float) -> bool:
         """Дотянет ли совпадение с этим произведением score хоть до одного порога."""

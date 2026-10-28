@@ -31,6 +31,18 @@ def test_long_stream_keeps_taken_positions_and_queue_bounded(make_rules):
     assert fired > 1000
 
 
+def test_taken_stays_bounded_when_each_event_fires_several_scenarios(make_rules):
+    # три срабатывания на событие: позиций прибавляется больше, чем проходит вызовов
+    engine = Engine(make_rules([
+        {"name": "token", "patterns": [["a"]]},
+        {"name": "any", "patterns": [["any"]]},
+        {"name": "word", "patterns": [["any_vac"]]},
+    ], vocabulary=["a"]))
+    for index in range(5000):
+        assert len(engine.push(Event("a", 0.9, float(index)))) == 3
+        assert engine._taken_count < 20
+
+
 def test_taken_is_cleared_once_nothing_is_active(make_rules):
     engine = Engine(make_rules([{"name": "pair", "patterns": [["a", "b"]]}]))
     for index in range(50):

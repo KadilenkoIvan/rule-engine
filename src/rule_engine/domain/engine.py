@@ -204,6 +204,9 @@ def dominates(a: Partial, b: Partial) -> bool:
     return a.tail.step.position >= b.tail.step.position and a.product >= b.product
 
 
+EMPTY: dict = {}  # переходы фронта набора `any`: их нет, словарь не заводится
+
+
 class Front:
     """Несравнимые совпадения одного места: позиции бора или состояния набора `any`.
 
@@ -218,10 +221,10 @@ class Front:
 
     def __init__(self, place: "Cursor | tuple[Collector, int]") -> None:
         self.place = place
-        self.items: list[Partial] = []
+        self.items: list[Partial | None] = []  # до `head` — None: снятые не держат историю
         self.head = 0  # совпадения до `head` сняты по сроку
         # у позиции бора: токен перехода → переходы с ним; по этим токенам фронт стоит в индексе
-        self.edges: dict[str, list[Edge]] = {}
+        self.edges: dict[str, list[Edge]] = {} if isinstance(place, Cursor) else EMPTY
 
     def __len__(self) -> int:
         return len(self.items) - self.head
@@ -248,6 +251,7 @@ class Front:
 
     def pop_first(self) -> Partial:
         partial = self.items[self.head]
+        self.items[self.head] = None
         self.head += 1
         if self.head * 2 >= len(self.items):  # сжатие: в среднем O(1) на снятое совпадение
             del self.items[: self.head]
@@ -433,6 +437,7 @@ class Engine:
         self._recent: deque[Step] = deque()  # события не старше `_lookback`: для тишины до шага
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
         self._taken_count = 0  # сколько позиций во всех `_taken`
+        self._kept = 0  # сколько позиций осталось после последней чистки `_taken`
         self._idle = 0  # вызовы `push` и `advance` с последней чистки `_taken`
         self._fired_at: dict[str, float] = {}  # сценарий → время его последнего выданного срабатывания
         self._position = 0
@@ -960,9 +965,14 @@ class Engine:
 
     def _tick(self) -> None:
         """Чистит `_taken`, когда с прошлой чистки прошло не меньше вызовов, чем кандидатов и
-        запомненных позиций: чистка обходит всех, а так она в среднем O(1) на вызов."""
+        позиций, оставшихся после неё.
+
+        Чистка обходит кандидатов и все позиции. Новые позиции оплачены срабатываниями, поэтому
+        на вызов приходится в среднем O(1) сверх них. Порог не растёт вместе с новыми
+        позициями: иначе при нескольких срабатываниях на событие чистка не наступала бы.
+        """
         self._idle += 1
-        if self._idle >= self._active_count + self._taken_count:
+        if self._idle >= self._active_count + self._kept:
             self._forget()
 
     def _forget(self) -> None:
@@ -991,5 +1001,5 @@ class Engine:
             for scenario, taken in self._taken.items()
             if (kept := {position for position in taken if position >= oldest})
         }
-        self._taken_count = sum(map(len, self._taken.values()))
+        self._taken_count = self._kept = sum(map(len, self._taken.values()))
         self._idle = 0
