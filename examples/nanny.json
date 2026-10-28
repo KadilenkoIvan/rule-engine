@@ -1,0 +1,10 @@
+{
+  "max_gap": 3.0,
+  "min_score": 0.5,
+  "min_confidence": 0.5,
+  "vocabulary": ["<плач>", "<голос>", "<шорох>"],
+  "scenarios": [
+    {"name": "тишина у ребёнка", "patterns": [["any", {"absent": ["any"], "for": 900.0}]]},
+    {"name": "ребёнок затих", "patterns": [["<плач>", {"absent": ["any_vac"], "for": 300.0}]]}
+  ]
+}
