@@ -23,7 +23,7 @@ from rule_engine.application.views import (
     WaitingView,
 )
 from rule_engine.domain.engine import Engine, Match, Miss, Step, Waiting, Window
-from rule_engine.domain.graph import Edge, Node, Silence, Start
+from rule_engine.domain.graph import Cursor, Edge, Node, Silence, Start
 from rule_engine.domain.rules import RuleSet
 from rule_engine.domain.unordered import Unordered
 
@@ -37,7 +37,7 @@ class Trace(NamedTuple):
 class Index(NamedTuple):
     """id вершин и наборов: по ним снимок совпадений ссылается на `GraphView`."""
 
-    nodes: dict[Node, int]
+    nodes: dict[Cursor, int]
     sets: dict[Unordered, int]
 
 
@@ -125,7 +125,7 @@ def frame(
 
 def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
     """Граф движка как view; вершины нумеруются в порядке обхода, как их печатает CLI."""
-    nodes: dict[Node, int] = {}
+    nodes: dict[Cursor, int] = {}
 
     def edge_view(edge: Start | Edge | Silence) -> TokenEdge | SilenceEdge:
         min_score = None if edge.min_score == rules.min_score else edge.min_score
@@ -135,13 +135,18 @@ def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
             return TokenEdge(edge.token, None, min_score)
         return TokenEdge(edge.token, edge.max_gap, min_score)
 
-    def node_view(edge: Start | Edge | Silence, node: Node) -> NodeView:
-        nodes[node] = len(nodes)
-        branches = (*node.children.items(), *node.silences.items())
-        children = tuple(node_view(child_edge, child) for child_edge, child in branches)
-        return NodeView(nodes[node], edge_view(edge), node.scenario, children)
+    def node_view(node: Node, offset: int = 1) -> NodeView:
+        # Интерфейсы получают прежнее логическое дерево, не физические radix-рёбра.
+        cursor = Cursor(node, offset)
+        nodes[cursor] = len(nodes)
+        if offset < len(node.segment):
+            children = (node_view(node, offset + 1),)
+        else:
+            branches = (*node.children.values(), *node.silences.values())
+            children = tuple(node_view(child) for child in branches)
+        return NodeView(nodes[cursor], edge_view(node.segment[offset - 1]), cursor.scenario, children)
 
-    roots = tuple(node_view(start, node) for start, node in engine.starts.items())
+    roots = tuple(node_view(node) for node in engine.starts.values())
     sets = {pattern: number for number, pattern in enumerate(engine.unordered)}
     set_views = tuple(
         SetView(
@@ -166,7 +171,7 @@ def event_view(step: Step) -> EventView:
 def waiting_view(item: Waiting, index: Index) -> WaitingView:
     steps = tuple(map(event_view, item.partial.steps))
     confidence = item.partial.confidence
-    if isinstance(item.place, Node):
+    if isinstance(item.place, Cursor):
         node = index.nodes[item.place]
         return WaitingView("node", node, frozenset(), steps, confidence, item.until)
     if isinstance(item.place, Window):
@@ -180,7 +185,7 @@ def miss_view(miss: Miss, index: Index) -> MissView:
     steps = () if miss.partial is None else tuple(map(event_view, miss.partial.steps))
     if miss.place is None:
         kind, place, filled = None, None, frozenset()
-    elif isinstance(miss.place, Node):
+    elif isinstance(miss.place, Cursor):
         kind, place, filled = "node", index.nodes[miss.place], frozenset()
     elif isinstance(miss.place, Window):
         kind, place, filled = "silence", index.nodes[miss.place.child], frozenset()

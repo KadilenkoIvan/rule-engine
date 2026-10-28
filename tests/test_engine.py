@@ -2,29 +2,32 @@ import random
 
 import pytest
 
-from rule_engine import Engine, Event, RuleSet, build_graph, graph_size
+from rule_engine import Engine, Event, RuleSet
 
 RULES = RuleSet.from_dict(
     {
+        "max_gap": 3.0,
+        "min_score": 0.5,
+        "min_confidence": 0.6,
         "vocabulary": [
             "включи", "выключи", "разогрей", "открой",
             "свет", "чайник", "ванну", "шторы",
             "в", "ванной", "спальне", "пожалуйста", "и",
         ],
         "scenarios": [
-            {"name": "свет в ванной", "pattern": "включи свет в ванной"},
-            {"name": "свет в спальне", "pattern": "включи свет в спальне"},
-            {"name": "чайник", "pattern": "разогрей чайник"},
-            {"name": "ванна", "pattern": "разогрей ванну"},
-            {"name": "шторы", "pattern": "открой шторы"},
-            {"name": "утро", "pattern": "открой шторы разогрей чайник"},
+            {"name": "свет в ванной", "patterns": [["включи", "свет", "в", "ванной"]]},
+            {"name": "свет в спальне", "patterns": [["включи", "свет", "в", "спальне"]]},
+            {"name": "чайник", "patterns": [["разогрей", "чайник"]]},
+            {"name": "ванна", "patterns": [["разогрей", "ванну"]]},
+            {"name": "шторы", "patterns": [["открой", "шторы"]]},
+            {"name": "утро", "patterns": [["открой", "шторы", "разогрей", "чайник"]]},
         ],
     }
 )
 
 
 def stream(text: str) -> list[Event]:
-    return [Event(token, 0.9) for token in text.split()]
+    return [Event(token, 0.9, index * 0.25) for index, token in enumerate(text.split())]
 
 
 def run(text: str) -> list[str]:
@@ -54,7 +57,7 @@ def test_repeated_start_merges_into_one_match_from_the_latest():
     assert [step.position for step in match.steps] == [1, 2]
 
 
-def test_completed_match_is_consumed():
+def test_completed_match_does_not_reuse_its_events():
     assert run("разогрей чайник чайник") == ["чайник"]
 
 
@@ -69,21 +72,20 @@ def test_chunk_boundaries_do_not_lose_matches():
     assert [match for event in events for match in engine.push(event)] == expected
 
 
-def test_active_matches_never_exceed_graph_size():
-    limit = graph_size(build_graph(RULES))
+def test_equal_scores_leave_at_most_one_candidate_per_cursor():
     vocabulary = sorted(RULES.vocabulary)
     rng = random.Random(0)
     engine = Engine(RULES)
-    for _ in range(5000):
-        engine.push(Event(rng.choice(vocabulary), 0.9))
-        assert engine.active_count <= limit
+    for index in range(5000):
+        engine.push(Event(rng.choice(vocabulary), 0.9, index * 0.25))
+        assert all(len(partials) == 1 for partials in engine._active.values())
 
 
-def test_unknown_token_raises():
-    with pytest.raises(ValueError, match="нет в словаре"):
-        Engine(RULES).push(Event("сделай", 0.9))
+def test_unknown_token_is_skipped_but_keeps_its_position():
+    [match] = Engine(RULES).feed(stream("разогрей сделай чайник"))
+    assert [step.position for step in match.steps] == [0, 2]
 
 
 def test_score_outside_unit_interval_raises():
     with pytest.raises(ValueError, match="вне"):
-        Event("свет", 1.5)
+        Event("свет", 1.5, 0.0)

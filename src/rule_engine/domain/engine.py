@@ -2,12 +2,13 @@
 
 import math
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import groupby
 from typing import NamedTuple
 
 from rule_engine.domain.graph import (
+    Cursor,
     Node,
     Silence,
     Start,
@@ -53,24 +54,57 @@ class Match:
     confidence: float  # общая уверенность: среднее геометрическое score шагов
 
 
-class Partial(NamedTuple):
-    """Частичное совпадение: его шаги и произведение их score."""
+@dataclass(frozen=True, slots=True)
+class History:
+    """Неизменяемое звено: кандидаты разделяют общие префиксы истории."""
 
-    steps: tuple[Step, ...]
+    step: Step
+    previous: "History | None" = None
+
+
+class Partial(NamedTuple):
+    """История событий отдельно от времени продолжения после токена или тишины."""
+
+    tail: History
     product: float
-    last: float  # секунды: время последнего шага, а после тишины — конец её окна
+    count: int
+    first_position: int
+    last_time: float
+
+    @classmethod
+    def begin(cls, step: Step) -> "Partial":
+        return cls(History(step), step.event.score, 1, step.position, step.event.time)
+
+    def backwards(self) -> Iterator[Step]:
+        link = self.tail
+        while link is not None:
+            yield link.step
+            link = link.previous
+
+    @property
+    def steps(self) -> tuple[Step, ...]:
+        """Полная история материализуется только для результата или интерфейса."""
+        steps = list(self.backwards())
+        steps.reverse()
+        return tuple(steps)
 
     @property
     def confidence(self) -> float:
         """Среднее геометрическое score шагов."""
-        return self.product ** (1 / len(self.steps))
+        return self.product ** (1 / self.count)
 
     def bound(self, length: int) -> float:
         """Уверенность в шаблоне длины `length`, если у оставшихся шагов score 1.0: выше не бывает."""
         return self.product ** (1 / length)
 
     def extend(self, step: Step) -> "Partial":
-        return Partial(self.steps + (step,), self.product * step.event.score, step.event.time)
+        return Partial(
+            History(step, self.tail),
+            self.product * step.event.score,
+            self.count + 1,
+            self.first_position,
+            step.event.time,
+        )
 
 
 class Window(NamedTuple):
@@ -80,9 +114,9 @@ class Window(NamedTuple):
     edge: Silence
 
     @property
-    def child(self) -> Node:
+    def child(self) -> Cursor:
         """Куда совпадение пойдёт, если окно пройдёт без запрещённых токенов."""
-        return self.node.silences[self.edge]
+        return Cursor(self.node.silences[self.edge], 1)
 
 
 class Hush(NamedTuple):
@@ -92,8 +126,8 @@ class Hush(NamedTuple):
     partial: Partial
 
 
-# где стоит совпадение: вершина бора, (шаблон `any`, закрытые шаги) или окно тишины
-Place = Node | tuple[Unordered, frozenset[int]] | Window
+# Где стоит совпадение: курсор radix trie, набор `any` или окно тишины.
+Place = Cursor | tuple[Unordered, frozenset[int]] | Window
 
 
 class Waiting(NamedTuple):
@@ -138,9 +172,9 @@ def dominates(a: Partial, b: Partial) -> bool:
     Тогда любое продолжение `b` есть и у `a`, со сроком не раньше и уверенностью не ниже. Если
     равны и последний шаг, и произведение, остаётся начавшееся позже.
     """
-    if (a.steps[-1].position, a.product) == (b.steps[-1].position, b.product):
-        return a.steps[0].position >= b.steps[0].position
-    return a.steps[-1].position >= b.steps[-1].position and a.product >= b.product
+    if (a.tail.step.position, a.product) == (b.tail.step.position, b.product):
+        return a.first_position >= b.first_position
+    return a.tail.step.position >= b.tail.step.position and a.product >= b.product
 
 
 def keep(partials: list[Partial], partial: Partial) -> None:
@@ -166,6 +200,10 @@ def before_of(scenario: Scenario) -> float:
 
 class Engine:
     """Частичные совпадения хранятся между вызовами, поэтому поток можно подавать порциями.
+
+    Токеновые цепочки без развилок, завершений и тишин хранятся сжатыми. Кандидат занимает
+    Cursor внутри сегмента; история разделяется по неизменяемым ссылкам History. Время
+    продолжения last_time независимо от истории: после тишины это срок окна, а не новый Step.
 
     - Токен, не продолжающий частичное совпадение, пропускается: совпадение ждёт дальше.
       Это относится и к токенам вне словаря: их позиция и время учитываются как обычно.
@@ -231,7 +269,7 @@ class Engine:
             (tuple(sorted(pattern.slots)), pattern.max_gap): pattern.scenario
             for pattern in self._unordered
         }
-        self._active: dict[Node, list[Partial]] = {}  # вершина → несравнимые совпадения в ней
+        self._active: dict[Cursor, list[Partial]] = {}  # позиция radix trie → кандидаты
         # (шаблон `any`, номера закрытых шагов) → несравнимые совпадения в этом состоянии
         self._sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         self._wheel: TimerWheel[Hush] = TimerWheel()  # сроки окон тишины
@@ -272,7 +310,23 @@ class Engine:
             self._defaults.min_confidence,
         )
         if scenario.order == "sequence":
-            insert_scenario(self._starts, rules, scenario)
+            splits = insert_scenario(self._starts, rules, scenario)
+            for old, prefix, cut in splits:
+
+                def relocate(place: Place | None) -> Place | None:
+                    if isinstance(place, Cursor) and place.node is old:
+                        return (
+                            Cursor(prefix, place.offset)
+                            if place.offset <= cut
+                            else Cursor(old, place.offset - cut)
+                        )
+                    return place
+
+                self._active = {
+                    relocate(place): partials for place, partials in self._active.items()
+                }
+                self._misses = [miss._replace(place=relocate(miss.place)) for miss in self._misses]
+            # Концы старых рёбер сохраняют identity и silences: Window и Timer не меняются.
         else:
             insert_unordered(self._unordered, self._unordered_owners, rules)
         self._cooldowns[scenario.name] = scenario.cooldown
@@ -319,14 +373,15 @@ class Engine:
 
     def snapshot(self) -> list[Waiting]:
         """Все частичные совпадения: в вершинах бора, в наборах `any` и в окнах тишины."""
-        # в `_active` стоят только вершины с рёбрами-токенами: в остальных ждать нечего
-        waiting = [
-            Waiting(node, partial, partial.last + max(edge.max_gap for edge in node.children))
-            for node, partials in self._active.items()
-            for partial in partials
-        ]
+        # В `_active` только позиции с токеновым продолжением, в том числе внутри сегмента.
+        waiting = []
+        for cursor, partials in self._active.items():
+            gap = max(edge.max_gap for edge, _ in cursor.transitions())
+            waiting.extend(
+                Waiting(cursor, partial, partial.last_time + gap) for partial in partials
+            )
         waiting += [
-            Waiting(key, partial, partial.last + key[0].max_gap)
+            Waiting(key, partial, partial.last_time + key[0].max_gap)
             for key, partials in self._sets.items()
             for partial in partials
         ]
@@ -363,7 +418,7 @@ class Engine:
         step = Step(self._position, event)
         self._position += 1
 
-        active: dict[Node, list[Partial]] = {}
+        active: dict[Cursor, list[Partial]] = {}
         sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
 
@@ -401,17 +456,19 @@ class Engine:
                 del self._hushes[timer]
                 misses.append(Miss("silence", window, partial, None, timer.deadline, event.time))
         for node, partials in self._active.items():
+            transitions = tuple(node.transitions())
+            max_gap = max(edge.max_gap for edge, _ in transitions)
             for partial in partials:
                 # срок считается от последнего шага совпадения, а не от последнего токена потока
-                last = partial.last
+                last = partial.last_time
                 elapsed = event.time - last
                 # сроки всех рёбер из вершины истекли: совпадение снято
-                expired = all(elapsed > edge.max_gap for edge in node.children)
+                expired = elapsed > max_gap
                 if not expired:
                     # копия остаётся в вершине и ждёт другого продолжения
                     keep(active.setdefault(node, []), partial)
                 matched = False  # есть ребро с токеном события: снятие объясняет опоздание
-                for edge, child in node.children.items():
+                for edge, child in transitions:
                     if not fits(edge.token, event.token, self._vocabulary):
                         continue
                     matched = True
@@ -426,19 +483,19 @@ class Engine:
                     else:
                         self._enter(child, partial.extend(step), active, completed)
                 if expired and not matched:
-                    deadline = last + max(edge.max_gap for edge in node.children)
+                    deadline = last + max_gap
                     misses.append(Miss("expired", node, partial, None, deadline, event.time))
         for start, child in self._starts.items():
             if not fits(start.token, event.token, self._vocabulary):
                 continue
             if event.score >= start.min_score:
                 # новое совпадение задержку не проверяет
-                self._enter(child, Partial((step,), event.score, event.time), active, completed)
+                self._enter(Cursor(child, 1), Partial.begin(step), active, completed)
             else:
-                misses.append(Miss("score", child, None, None, start.min_score, event.score))
+                misses.append(Miss("score", Cursor(child, 1), None, None, start.min_score, event.score))
         for (pattern, filled), partials in self._sets.items():
             for partial in partials:
-                deadline = partial.last + pattern.max_gap
+                deadline = partial.last_time + pattern.max_gap
                 if event.time > deadline:
                     # задержка у открытых шагов одна, и она истекла: совпадение снято
                     fitting = pattern.free(filled, event.token, 1.0, self._vocabulary)
@@ -458,7 +515,7 @@ class Engine:
         for pattern in self._unordered:
             # начать набор может любой его шаг
             for index in pattern.free(frozenset(), event.token, event.score, self._vocabulary):
-                collect(pattern, frozenset({index}), Partial((step,), event.score, event.time))
+                collect(pattern, frozenset({index}), Partial.begin(step))
             for index in low_slots(pattern, frozenset()):
                 threshold = pattern.slots[index].min_score
                 misses.append(
@@ -491,25 +548,25 @@ class Engine:
                 del self._hushes[timer]
                 window, partial = timer.payload
                 # после тишины не бывает тишины (rules.py), поэтому окна здесь не открываются
-                self._enter(window.child, partial._replace(last=deadline), self._active, completed)
+                self._enter(window.child, partial._replace(last_time=deadline), self._active, completed)
             matches += self._finish(completed, deadline)
         return matches
 
     def _enter(
         self,
-        node: Node,
+        node: Cursor,
         partial: Partial,
-        active: dict[Node, list[Partial]],
+        active: dict[Cursor, list[Partial]],
         completed: dict[str, list[Partial]],
     ) -> None:
         if node.scenario is not None:
             completed.setdefault(node.scenario, []).append(partial)
         # ранний отсев; у вершины без продолжений `ahead` пуст, и совпадение в ней не остаётся
         if any(partial.bound(length) >= threshold for length, threshold in node.ahead):
-            if node.children:
+            if node.offset < len(node.node.segment) or node.node.children:
                 keep(active.setdefault(node, []), partial)
-            for edge in node.silences:
-                self._open(Window(node, edge), partial)
+            for edge in node.silences():
+                self._open(Window(node.node, edge), partial)
         elif node.ahead:
             # ближе всего к порогу — шаблон с наибольшим запасом
             length, threshold = max(node.ahead, key=lambda item: partial.bound(item[0]) - item[1])
@@ -520,14 +577,14 @@ class Engine:
     def _open(self, window: Window, partial: Partial) -> None:
         """Открывает окно тишины, если запрещённого токена не было и `before` секунд до шага."""
         edge = window.edge
-        deadline = partial.last + edge.duration
+        deadline = partial.last_time + edge.duration
         if edge.before > 0:
-            own = {position for position, _ in partial.steps}
+            own = {step.position for step in partial.backwards()}
             # в `_recent` только события раньше текущего: само событие шага тишину не нарушает,
             # прежние шаги совпадения — тоже
             for step in self._recent:
                 if (
-                    step.event.time >= partial.last - edge.before
+                    step.event.time >= partial.last_time - edge.before
                     and step.position not in own
                     and self._breaks(edge, step.event)
                 ):
@@ -557,7 +614,7 @@ class Engine:
             partial
             for partial in partials
             if partial.confidence >= self._min_confidences[scenario]
-            and taken.isdisjoint(position for position, _ in partial.steps)
+            and taken.isdisjoint(step.position for step in partial.backwards())
         ]
         if not eligible:
             # уверенность ниже порога или повтор: токен уже вошёл в выданное срабатывание
@@ -571,13 +628,13 @@ class Engine:
                 else:
                     self._misses.append(Miss("repeat", None, partial, scenario, 0.0, 0.0))
             return None
-        best = max(eligible, key=lambda partial: (partial.confidence, partial.steps[0].position))
+        best = max(eligible, key=lambda partial: (partial.confidence, partial.first_position))
         fired_at = self._fired_at.get(scenario)
         if fired_at is not None and time - fired_at < self._cooldowns[scenario]:
             until = fired_at + self._cooldowns[scenario]
             self._misses.append(Miss("cooldown", None, best, scenario, until, time))
             return None
-        taken.update(position for position, _ in best.steps)
+        taken.update(step.position for step in best.backwards())
         self._fired_at[scenario] = time
         return Match(scenario, best.steps, best.confidence)
 
@@ -589,11 +646,11 @@ class Engine:
         oldest = min(
             (
                 *(
-                    partial.steps[0].position
+                    partial.first_position
                     for partials in (*self._active.values(), *self._sets.values())
                     for partial in partials
                 ),
-                *(timer.payload.partial.steps[0].position for timer in self._hushes),
+                *(timer.payload.partial.first_position for timer in self._hushes),
             ),
             default=self._position,
         )
