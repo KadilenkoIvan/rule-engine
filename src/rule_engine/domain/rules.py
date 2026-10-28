@@ -229,6 +229,19 @@ def fits(expected: str, token: str, vocabulary: frozenset[str]) -> bool:
     return token == expected
 
 
+def fitting(token: str, vocabulary: frozenset[str]) -> tuple[str, ...]:
+    """Токены шагов, к которым подходит токен события (`fits`): по ним ищут в индексах.
+
+    Сам токен — только если он не `any` и не `any_vac`: события с таким токеном подходят
+    к шагу `any`, но не к шагу `any_vac` (в словаре их не бывает).
+    """
+    if token in WILDCARDS:
+        return (ANY,)
+    if token in vocabulary:
+        return (ANY, token, ANY_VOCABULARY)
+    return (ANY, token)
+
+
 def step_label(step: PatternStep | SilenceStep) -> str:
     """Шаг в сообщении об ошибке."""
     if isinstance(step, SilenceStep):

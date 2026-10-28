@@ -3,6 +3,7 @@
 В граф входят сценарии с `order: "sequence"`; шаблоны `any` собирает unordered.py.
 """
 
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -32,13 +33,49 @@ class Silence(NamedTuple):
     min_score: float  # порог score запрещённых токенов
 
 
+class Targets:
+    """Завершения шаблонов ниже позиции: для каждой длины шаблона — наименьший порог общей
+    уверенности среди шаблонов этой длины.
+
+    По ним движок снимает совпадение, которое не дотянет ни до одного порога (ранний отсев).
+    Неравенство `product ** (1 / L) >= порог` для шаблонов одной длины L выполнено хоть для
+    одного, только если выполнено для наименьшего порога, поэтому хватает пары на длину, а
+    отсев проверяет её той же формулой. Ближе всего к порогу (отчёт об отсеве) тоже шаблон с
+    наименьшим порогом своей длины.
+    """
+
+    __slots__ = ("lowest",)
+
+    def __init__(self) -> None:
+        self.lowest: dict[int, float] = {}  # длина шаблона → наименьший порог
+
+    def add(self, target: tuple[int, float]) -> None:
+        length, threshold = target
+        if threshold < self.lowest.get(length, math.inf):
+            self.lowest[length] = threshold
+
+    def update(self, other: "Targets") -> None:
+        for target in other:
+            self.add(target)
+
+    def __iter__(self) -> Iterator[tuple[int, float]]:
+        return iter(self.lowest.items())
+
+    def __len__(self) -> int:
+        return len(self.lowest)
+
+    def reaches(self, product: float) -> bool:
+        """Дотянет ли совпадение с этим произведением score хоть до одного порога."""
+        return any(product ** (1 / length) >= threshold for length, threshold in self.lowest.items())
+
+
 @dataclass(eq=False, slots=True)
 class Node:
     """Конец сжатого ребра; сравнивается по identity, курсоры ссылаются на этот объект."""
 
     segment: tuple[Start | Edge | Silence, ...]
     # Все достижимые завершения, включая эту вершину: для позиций внутри segment.
-    through: set[tuple[int, float]] = field(default_factory=set)
+    through: Targets = field(default_factory=Targets)
     # шаги с одним токеном, но разной задержкой или порогом — разные рёбра: иначе одному совпадению
     # в общей вершине пришлось бы ждать по срокам и порогам разных сценариев
     children: dict[Edge, "Node"] = field(default_factory=dict)
@@ -48,7 +85,8 @@ class Node:
     # (длина шаблона, порог общей уверенности его сценария) для шаблонов, которые кончаются ниже
     # вершины: по ним движок снимает совпадение, которое не дотянет ни до одного порога. Длина —
     # без шагов-тишин: в общую уверенность они не входят
-    ahead: set[tuple[int, float]] = field(default_factory=set)
+    ahead: Targets = field(default_factory=Targets)
+    max_gap: float = 0.0  # наибольшая задержка `children`: дольше в конце сегмента ждать нечего
 
 
 class Cursor(NamedTuple):
@@ -62,8 +100,15 @@ class Cursor(NamedTuple):
         return self.node.scenario if self.offset == len(self.node.segment) else None
 
     @property
-    def ahead(self) -> set[tuple[int, float]]:
+    def ahead(self) -> Targets:
         return self.node.through if self.offset < len(self.node.segment) else self.node.ahead
+
+    @property
+    def max_gap(self) -> float:
+        """Наибольшая задержка переходов: позже неё совпадению отсюда продолжиться некуда."""
+        if self.offset < len(self.node.segment):
+            return self.node.segment[self.offset].max_gap
+        return self.node.max_gap
 
     def transitions(self) -> Iterator[tuple[Edge, "Cursor"]]:
         if self.offset < len(self.node.segment):
@@ -71,6 +116,12 @@ class Cursor(NamedTuple):
         else:
             for edge, child in self.node.children.items():
                 yield edge, Cursor(child, 1)
+
+    def follow(self, edge: Edge) -> "Cursor":
+        """Позиция за переходом `edge` отсюда."""
+        if self.offset < len(self.node.segment):
+            return Cursor(self.node, self.offset + 1)
+        return Cursor(self.node.children[edge], 1)
 
     def silences(self) -> Iterator[Silence]:
         if self.offset == len(self.node.segment):
@@ -89,16 +140,32 @@ def build_graph(rules: RuleSet) -> dict[Start, Node]:
     return starts
 
 
-def insert_scenario(
-    starts: dict[Start, Node], rules: RuleSet, scenario: Scenario
-) -> list[tuple[Node, Node, int]]:
-    """Дописывает пути и возвращает расщепления для переноса активных курсоров.
+class Changes(NamedTuple):
+    """Что вставка изменила в боре: по этому движок переносит и дописывает свои индексы."""
+
+    splits: list[tuple[Node, Node, int]]  # (вершина, теперь суффикс; её префикс; длина префикса)
+    starts: list[Start]  # новые рёбра из корня
+    links: list[tuple[Node, Edge]]  # новые токеновые рёбра из конца сегмента вершины
+
+
+def attach(node: Node, edge: Edge | Silence, child: Node) -> None:
+    """Ребро из конца сегмента `node`; задержка конца сегмента — наибольшая у его рёбер."""
+    if isinstance(edge, Silence):
+        node.silences[edge] = child
+    else:
+        node.children[edge] = child
+        node.max_gap = max(node.max_gap, edge.max_gap)
+
+
+def insert_scenario(starts: dict[Start, Node], rules: RuleSet, scenario: Scenario) -> Changes:
+    """Дописывает пути и возвращает изменения бора для переноса активных курсоров.
 
     Конфликты полных шаблонов проверяются до изменения бора, по прежним правилам.
     Старый Node остаётся концом суффикса: его рёбра-тишины и открытые Window стабильны.
     """
+    changes = Changes([], [], [])
     if scenario.order != "sequence":
-        return []
+        return changes
     paths: list[tuple[Start | Edge | Silence, ...]] = []
     for first, *rest in scenario.patterns:
         start = Start(first.token, rules.threshold(scenario, first))
@@ -120,15 +187,15 @@ def insert_scenario(
                 break
             node = branches(node, remaining[0]).get(remaining[0])
 
-    splits: list[tuple[Node, Node, int]] = []
     threshold = rules.confidence_threshold(scenario)
     for path in paths:
         remaining = path
-        children = starts
+        parent: Node | None = None
         ancestors = []
         target = (sum(not isinstance(edge, Silence) for edge in path), threshold)
         while True:
             key = remaining[0]
+            children = starts if parent is None else branches(parent, key)
             node = children.get(key)
             if node is None:
                 # Тишина не сливается ни с предыдущими, ни со следующими токенами.
@@ -137,7 +204,13 @@ def insert_scenario(
                     while length < len(remaining) and not isinstance(remaining[length], Silence):
                         length += 1
                 node = Node(remaining[:length])
-                children[key] = node
+                if parent is None:
+                    starts[key] = node
+                    changes.starts.append(key)
+                else:
+                    attach(parent, key, node)
+                    if isinstance(key, Edge):
+                        changes.links.append((parent, key))
             else:
                 common = 0
                 for old, new in zip(node.segment, remaining):
@@ -149,21 +222,21 @@ def insert_scenario(
                     prefix.ahead.update(node.through)
                     prefix.through.update(node.through)
                     node.segment = node.segment[common:]
-                    prefix.children[node.segment[0]] = node
-                    children[key] = prefix
-                    splits.append((node, prefix, common))
+                    attach(prefix, node.segment[0], node)
+                    children[key] = prefix  # ребро то же, поэтому задержка родителя прежняя
+                    changes.splits.append((node, prefix, common))
                     node = prefix
             remaining = remaining[len(node.segment) :]
             if not remaining:
                 break
             ancestors.append(node)
-            children = branches(node, remaining[0])
+            parent = node
         node.scenario = scenario.name
         node.through.add(target)
         for above in ancestors:
             above.ahead.add(target)
             above.through.add(target)
-    return splits
+    return changes
 
 
 def edge_of(rules: RuleSet, scenario: Scenario, step: PatternStep | SilenceStep) -> Edge | Silence:

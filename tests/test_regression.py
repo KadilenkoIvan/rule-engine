@@ -4,7 +4,7 @@ import pytest
 
 from rule_engine import Cursor, Engine, Event, Start
 from rule_engine.domain.engine import Window
-from rule_engine.domain.graph import Node, Silence, edge_of
+from rule_engine.domain.graph import Node, Silence, attach, branches, edge_of
 
 
 def expanded_graph(rules):
@@ -16,18 +16,20 @@ def expanded_graph(rules):
         for first, *rest in scenario.patterns:
             edges = [Start(first.token, rules.threshold(scenario, first))]
             edges.extend(edge_of(rules, scenario, step) for step in rest)
-            children = starts
+            parent = None
             nodes = []
             for edge in edges:
+                # Вид ребра определяет, в каком словаре родителя лежит потомок.
+                children = starts if parent is None else branches(parent, edge)
                 node = children.get(edge)
                 if node is None:
                     node = Node((edge,))
-                    children[edge] = node
+                    if parent is None:
+                        starts[edge] = node
+                    else:
+                        attach(parent, edge, node)
                 nodes.append(node)
-                # Вид следующего ребра определяет, в каком словаре лежит потомок.
-                if len(nodes) < len(edges):
-                    next_edge = edges[len(nodes)]
-                    children = node.silences if isinstance(next_edge, Silence) else node.children
+                parent = node
             node.scenario = scenario.name
             target = (sum(not isinstance(edge, Silence) for edge in edges),
                       rules.confidence_threshold(scenario))

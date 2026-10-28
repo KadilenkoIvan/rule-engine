@@ -77,8 +77,8 @@ def test_incomparable_candidates_can_exceed_physical_graph_size(make_rules):
     engine.push(Event("a", 0.9, 0.0))
     engine.push(Event("a", 0.6, 1.0))
     assert engine.active_count == 2 > graph_size(engine.starts)
-    [partials] = engine._active.values()
-    assert {partial.first_position for partial in partials} == {0, 1}
+    [front] = engine._fronts.values()
+    assert {partial.first_position for partial in front} == {0, 1}
 
 
 def test_history_extension_shares_prefix_and_preserves_events():
@@ -126,7 +126,7 @@ def test_dynamic_splits_move_cursors_and_preserve_an_open_timer(make_rules):
     assert timer.payload.window is window
     assert timer.payload.partial.tail is tail
     assert {tuple(step.token for step in cursor.node.segment[:cursor.offset])
-            for cursor in engine._active} == {("a",), ("b",)}
+            for cursor in engine._fronts} == {("a",), ("b",)}
     assert engine.advance(5.0) == []
     after = [waiting.partial for waiting in engine.snapshot() if waiting.partial.last_time == 4.0]
     [partial] = after

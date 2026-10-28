@@ -49,7 +49,7 @@ def test_overlapping_slots_branch_and_repeated_slots_need_distinct_events(make_r
         {"name": "s", "order": "any", "patterns": [["a", "a", "any"]]},
     ]))
     assert engine.push(Event("a", 0.9, 0.0)) == []
-    assert {filled for _, filled in engine._sets} == {frozenset({0}), frozenset({2})}
+    assert {waiting.place[1] for waiting in engine.snapshot()} == {frozenset({0}), frozenset({2})}
     assert engine.push(Event("unknown", 0.9, 1.0)) == []
     [match] = engine.push(Event("a", 0.9, 2.0))
     assert [step.position for step in match.steps] == [0, 1, 2]
