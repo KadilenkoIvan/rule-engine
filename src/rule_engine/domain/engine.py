@@ -88,6 +88,12 @@ class Partial(NamedTuple):
         steps.reverse()
         return tuple(steps)
 
+    def positions(self) -> list[int]:
+        """Позиции шагов по порядку: для ничьей, когда равны уверенность и начало."""
+        positions = [step.position for step in self.backwards()]
+        positions.reverse()
+        return positions
+
     @property
     def confidence(self) -> float:
         """Среднее геометрическое score шагов."""
@@ -166,14 +172,25 @@ class Miss(NamedTuple):
     got: float
 
 
+def later(a: Partial, b: Partial) -> bool:
+    """Шаги `a` не раньше шагов `b`: позиции сравниваются целиком, слева направо.
+
+    Начало сравнивается сразу, а историю собирает только ничья по началу.
+    """
+    if a.first_position != b.first_position:
+        return a.first_position > b.first_position
+    return a.positions() >= b.positions()
+
+
 def dominates(a: Partial, b: Partial) -> bool:
     """`a` вытесняет `b` из вершины: последний шаг у `a` не раньше, а произведение не меньше.
 
     Тогда любое продолжение `b` есть и у `a`, со сроком не раньше и уверенностью не ниже. Если
-    равны и последний шаг, и произведение, остаётся начавшееся позже.
+    равны и последний шаг, и произведение, остаётся то, у кого шаги позже (`later`): так исход
+    не зависит от того, в каком порядке совпадения пришли в вершину.
     """
     if (a.tail.step.position, a.product) == (b.tail.step.position, b.product):
-        return a.first_position >= b.first_position
+        return later(a, b)
     return a.tail.step.position >= b.tail.step.position and a.product >= b.product
 
 
@@ -245,8 +262,11 @@ class Engine:
       Окна с одним сроком закрываются в один момент; сработавшие на нём сценарии получают
       время конца окна (для cooldown).
     - Если на одном событии завершились несколько совпадений одного сценария, выдаётся не
-      больше одного: последний токен у них общий. Выдаётся самое уверенное, а при равной
-      уверенности — начавшееся позже.
+      больше одного: последний токен у них общий. Выдаётся самое уверенное, при равной
+      уверенности — начавшееся позже, а при равном начале — с более поздними шагами.
+    - Срабатывания одного момента (события или группы окон с одним сроком) выдаются от
+      начавшегося раньше, при равном начале — в порядке объявления сценариев; добавленные
+      через `add_scenario` объявлены после прежних. Моменты идут по времени.
     - Срабатывание не выдаётся, если у него есть общий токен с выданным срабатыванием того же
       сценария (токены сравниваются по позиции в потоке) или если с выданного срабатывания
       этого сценария прошло меньше его `cooldown`. Невыданное срабатывание не занимает токены
@@ -260,6 +280,8 @@ class Engine:
         self._defaults = rules  # стандартные задержка и пороги не меняются
         self._vocabulary = rules.vocabulary
         self._cooldowns = {scenario.name: scenario.cooldown for scenario in rules.scenarios}
+        # сценарий → номер объявления: срабатывания одного момента с одним началом идут так
+        self._declared = {scenario.name: index for index, scenario in enumerate(rules.scenarios)}
         self._min_confidences = {
             scenario.name: rules.confidence_threshold(scenario) for scenario in rules.scenarios
         }
@@ -330,6 +352,7 @@ class Engine:
         else:
             insert_unordered(self._unordered, self._unordered_owners, rules)
         self._cooldowns[scenario.name] = scenario.cooldown
+        self._declared[scenario.name] = len(self._declared)
         self._min_confidences[scenario.name] = rules.confidence_threshold(scenario)
         self._vocabulary = vocabulary
         self._lookback = max(self._lookback, before_of(scenario))
@@ -601,11 +624,13 @@ class Engine:
         )
 
     def _finish(self, completed: dict[str, list[Partial]], time: float) -> list[Match]:
+        """Срабатывания одного момента: от начавшегося раньше, при равном начале — по объявлению."""
         matches = []
         for scenario, partials in completed.items():
             match = self._fire(scenario, partials, time)
             if match is not None:
                 matches.append(match)
+        matches.sort(key=lambda match: (match.steps[0].position, self._declared[match.scenario]))
         return matches
 
     def _fire(self, scenario: str, partials: list[Partial], time: float) -> Match | None:
@@ -628,7 +653,13 @@ class Engine:
                 else:
                     self._misses.append(Miss("repeat", None, partial, scenario, 0.0, 0.0))
             return None
-        best = max(eligible, key=lambda partial: (partial.confidence, partial.first_position))
+        # самое уверенное; при равной уверенности — с более поздними шагами (`later`)
+        best = eligible[0]
+        for partial in eligible[1:]:
+            if partial.confidence > best.confidence or (
+                partial.confidence == best.confidence and later(partial, best)
+            ):
+                best = partial
         fired_at = self._fired_at.get(scenario)
         if fired_at is not None and time - fired_at < self._cooldowns[scenario]:
             until = fired_at + self._cooldowns[scenario]
