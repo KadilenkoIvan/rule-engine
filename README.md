@@ -636,9 +636,20 @@ CLI и веб взаимозаменяемы: оба работают тольк
 
 - [main.py](src/rule_engine/main.py): точка сборки, выбор интерфейса;
 - [domain/rules.py](src/rule_engine/domain/rules.py): словарь и сценарии, загрузка JSON, проверки;
-- [domain/graph.py](src/rule_engine/domain/graph.py): построение графа;
+- [domain/graph.py](src/rule_engine/domain/graph.py): построение графа, ранний отсев в вершине;
 - [domain/unordered.py](src/rule_engine/domain/unordered.py): шаблоны сценариев с `"order": "any"`;
-- [domain/engine.py](src/rule_engine/domain/engine.py): проход потока по графу и по наборам `any`, снимок совпадений, отказы;
+- [domain/matching.py](src/rule_engine/domain/matching.py): события, частичные совпадения,
+  вытеснение, отказы и снимок; `Tick` — что меняет одно событие;
+- [domain/front.py](src/rule_engine/domain/front.py): совпадения одного места от старых к
+  свежим и очередь их сроков;
+- [domain/trie_matcher.py](src/rule_engine/domain/trie_matcher.py): проход по графу — индекс
+  рёбер по токену, продолжение и начало совпадений;
+- [domain/set_matcher.py](src/rule_engine/domain/set_matcher.py): проход по наборам `any` —
+  закрытие шагов и начало наборов;
+- [domain/firing.py](src/rule_engine/domain/firing.py): выдача срабатываний — общая
+  уверенность, повторы, cooldown, порядок;
+- [domain/engine.py](src/rule_engine/domain/engine.py): движок — проход события по шагам,
+  добавление сценария, снимок;
 - [application/service.py](src/rule_engine/application/service.py): сценарии использования — граф и прогон;
 - [application/views.py](src/rule_engine/application/views.py): view-модели — граф, кадры, срабатывания;
 - [application/stream.py](src/rule_engine/application/stream.py): формат потока;
