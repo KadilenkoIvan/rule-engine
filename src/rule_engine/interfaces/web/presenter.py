@@ -11,6 +11,7 @@ from rule_engine.application.views import (
     MatchView,
     MissView,
     NodeView,
+    SilenceEdge,
     WaitingView,
 )
 from rule_engine.interfaces.web.svg import layout
@@ -26,11 +27,16 @@ class State(NamedTuple):
     fired: set[int]  # вершины, где сработал сценарий
     sets: dict[int, list[WaitingView]]  # набор `any` → совпадения в нём
     fired_sets: set[int]
-    missed: set[int]  # вершины, ребро в которые не пустило токен: порог или опоздание
+    missed: set[int]  # вершины, ребро в которые не пустило токен: порог, опоздание, тишина
     missed_sets: set[int]  # наборы, которые не пустили токен
+    hushed: set[int]  # вершины за рёбрами-тишинами, где идёт окно
 
 
-EMPTY = State({}, set(), set(), {}, set(), set(), set())
+def empty() -> State:
+    return State({}, set(), set(), {}, set(), set(), set(), set())
+
+
+EMPTY = empty()
 
 # причина отказа → метка и класс строки: порог уверенности, время, повтор
 REASONS = {
@@ -39,6 +45,7 @@ REASONS = {
     "confidence": ("общая уверенность", "score"),
     "late": ("задержка", "late"),
     "expired": ("задержка", "late"),
+    "silence": ("тишина", "late"),
     "cooldown": ("cooldown", "late"),
     "repeat": ("повтор", "repeat"),
 }
@@ -65,18 +72,26 @@ class Paths:
     def __init__(self, graph: GraphView) -> None:
         self.graph = graph
         self.parents: dict[int, int | None] = {}
-        self.tokens: dict[int, tuple[str, ...]] = {}  # токены рёбер от корня до вершины
+        self.tokens: dict[int, tuple[str, ...]] = {}  # токены рёбер от корня до вершины, без тишин
+        self.labels: dict[int, tuple[str, ...]] = {}  # подписи рёбер от корня до вершины
         self.nodes: dict[int, NodeView] = {}
 
-        def walk(node: NodeView, parent: int | None, tokens: tuple[str, ...]) -> None:
+        def walk(node: NodeView, parent: int | None) -> None:
             self.parents[node.id] = parent
-            self.tokens[node.id] = (*tokens, node.edge.token)
+            tokens = () if parent is None else self.tokens[parent]
+            labels = () if parent is None else self.labels[parent]
+            if isinstance(node.edge, SilenceEdge):
+                self.tokens[node.id] = tokens
+                self.labels[node.id] = (*labels, f"тишина {node.edge.duration:g} с")
+            else:
+                self.tokens[node.id] = (*tokens, node.edge.token)
+                self.labels[node.id] = (*labels, node.edge.token)
             self.nodes[node.id] = node
             for child in node.children:
-                walk(child, node.id, self.tokens[node.id])
+                walk(child, node.id)
 
         for root in graph.roots:
-            walk(root, None, ())
+            walk(root, None)
 
     def up(self, node: int | None) -> set[int]:
         """Вершина и все её предки."""
@@ -106,11 +121,14 @@ class Paths:
         return nodes, sets
 
     def state(self, frame: Frame) -> State:
-        state = State({}, set(), set(), {}, set(), set(), set())
+        state = empty()
         for item in frame.waiting:
             if item.kind == "node":
                 state.active[item.place] = state.active.get(item.place, 0) + 1
                 state.passed.update(self.up(item.place))
+            elif item.kind == "silence":
+                state.hushed.add(item.place)
+                state.passed.update(self.up(self.parents[item.place]))
             else:
                 state.sets.setdefault(item.place, []).append(item)
         for match in frame.matches:
@@ -122,6 +140,8 @@ class Paths:
         for miss in frame.misses:
             if miss.reason in ("score", "late") and miss.kind == "node":
                 state.missed.add(miss.place)
+            elif miss.reason == "silence":
+                state.missed.add(miss.place)
             elif miss.reason in ("score", "late") and miss.kind == "set":
                 state.missed_sets.add(miss.place)
         return state
@@ -130,7 +150,7 @@ class Paths:
         pattern = self.graph.sets[place]
         return f"{{{', '.join(slot.token for slot in pattern.slots)}}} «{pattern.scenario}»"
 
-    def explain(self, miss: MissView, token: str) -> str:
+    def explain(self, miss: MissView, token: str | None) -> str:
         """Отказ словами: что не продвинулось, и с чем сравнили."""
         score = f"уверенность {miss.got:.2f} ниже порога {miss.need:g}"
         late = f"ждали до {miss.need:g}, а токен пришёл в {miss.got:g}"
@@ -154,7 +174,19 @@ class Paths:
                 return f"набор {name} не начался с «{token}»: {score}"
             why = late if miss.reason == "late" else score
             return f"набор {name} не закрыл шаг «{token}»: {why}"
-        path = " → ".join(self.tokens[miss.place])
+        path = " → ".join(self.labels[miss.place])
+        if miss.reason == "silence":
+            before = " → ".join(self.labels[miss.place][:-1])
+            last = miss.steps[-1].time
+            if miss.got < last:
+                return (
+                    f"«{before}» не начало ждать тишину: запрещённый токен пришёл в {miss.got:g}, "
+                    f"за {last - miss.got:.1f} с до шага"
+                )
+            return (
+                f"«{before}» не дождалось тишины: «{token}» пришёл в {miss.got:g}, а тишина "
+                f"нужна до {miss.need:g}"
+            )
         if miss.reason == "expired":
             return f"«{path}» снято: ждало продолжения до {miss.need:g}"
         if miss.reason == "pruned":
@@ -164,18 +196,26 @@ class Paths:
             )
         if not miss.steps:
             return f"новое совпадение с «{token}» не началось: {score}"
-        before = " → ".join(self.tokens[miss.place][:-1])
+        before = " → ".join(self.labels[miss.place][:-1])
         why = late if miss.reason == "late" else score
         return f"«{before}» не пошло дальше по «{token}»: {why}"
 
     def notes(self, frame: Frame) -> Notes:
         main: dict[tuple[str, str, str], int] = {}
         expired: dict[tuple[str, str, str], int] = {}
+        token = None if frame.event is None else frame.event.token
         for miss in frame.misses:
             tag, css = REASONS[miss.reason]
-            key = (tag, css, self.explain(miss, frame.event.token))
+            key = (tag, css, self.explain(miss, token))
             target = expired if miss.reason == "expired" else main
             target[key] = target.get(key, 0) + 1
+        if frame.event is None:
+            # кадр по таймеру: пропускать нечего
+            return Notes(
+                [Note(*key, count) for key, count in main.items()],
+                [Note(*key, count) for key, count in expired.items()],
+                False,
+            )
         position = frame.event.position
         used = any(
             step.position == position
@@ -193,7 +233,7 @@ class Paths:
         if item.kind == "set":
             pattern = self.graph.sets[item.place]
             return f"{{{', '.join(slot.token for slot in pattern.slots)}}} → {pattern.scenario}"
-        return " → ".join(self.tokens[item.place])
+        return " → ".join(self.labels[item.place])
 
 
 class Presenter:

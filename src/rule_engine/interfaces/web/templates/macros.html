@@ -7,7 +7,7 @@
      role="img" aria-label="Граф сценариев">
   <circle class="root" cx="{{ lay.root_x|g }}" cy="{{ lay.root_y|g }}" r="5"/>
   {% for box in lay.boxes %}
-  <g class="edge{% if box.id in state.missed %} missed{% endif %}{% if box.id in state.passed %} passed{% endif %}">
+  <g class="edge{% if box.silence %} silence{% endif %}{% if box.id in state.hushed %} hush{% endif %}{% if box.id in state.missed %} missed{% endif %}{% if box.id in state.passed %} passed{% endif %}">
     <path d="{{ box.path }}"/>
     <text class="label" x="{{ box.label_x|g }}" y="{{ (box.y - 8)|g }}">{{ box.label }}</text>
   </g>
@@ -44,7 +44,7 @@
     {% for item in state.sets.get(pattern.id, []) %}
     <div class="progress">
       {% for slot in pattern.slots %}<span class="dot{% if loop.index0 in item.filled %} on{% endif %}" title="{{ slot.token }}"></span>{% endfor %}
-      <span class="muted">{{ item.confidence|score }} · ждёт до {{ item.until|g }}, ещё {{ "%.1f"|format(item.until - frame.event.time) }} с</span>
+      <span class="muted">{{ item.confidence|score }} · ждёт до {{ item.until|g }}, ещё {{ "%.1f"|format(item.until - frame.time) }} с</span>
     </div>
     {% endfor %}
   </div>
@@ -65,8 +65,12 @@
 {% endmacro %}
 
 {% macro title(frame) %}
+{% if frame.event is none %}
+⏱ <span class="muted">без события: окно тишины кончилось @ {{ frame.time|g }}</span>
+{% else %}
 <span class="muted">#{{ frame.event.position }}</span> {{ frame.event.token }}
 <span class="muted">{{ frame.event.score|score }} @ {{ frame.event.time|g }}</span>
+{% endif %}
 {% endmacro %}
 
 {% macro note_list(notes) %}
@@ -107,7 +111,7 @@
       <td>{{ paths.where(item) }}</td>
       <td>{{ steps(item.steps) }}</td>
       <td>{{ item.confidence|score }}</td>
-      <td>до {{ item.until|g }} <span class="muted">ещё {{ "%.1f"|format(item.until - frame.event.time) }} с</span></td>
+      <td>{% if item.kind == "silence" %}тишины {% endif %}до {{ item.until|g }} <span class="muted">ещё {{ "%.1f"|format(item.until - frame.time) }} с</span></td>
     </tr>
     {% endfor %}
   </tbody>

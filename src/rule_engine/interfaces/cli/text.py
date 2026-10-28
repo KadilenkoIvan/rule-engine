@@ -1,13 +1,23 @@
 """Текст для командной строки: граф деревом и строки срабатываний."""
 
-from rule_engine.application.views import GraphView, MatchView, NodeView, SetView, TokenEdge
+from rule_engine.application.views import (
+    GraphView,
+    MatchView,
+    NodeView,
+    SetView,
+    SilenceEdge,
+    TokenEdge,
+)
 
 
 def render(graph: GraphView) -> str:
     """Бор, под ним шаблоны `any`. Задержку и порог показывает, где они отличаются от корня."""
     lines = ["(начало)"]
 
-    def label(edge: TokenEdge) -> str:
+    def label(edge: TokenEdge | SilenceEdge) -> str:
+        if isinstance(edge, SilenceEdge):
+            text = f"тишина {edge.duration:g} с: {', '.join(edge.tokens)}"
+            return text if edge.min_score is None else f"{text} [≥ {edge.min_score:g}]"
         notes = []
         if edge.max_gap is not None:
             notes.append(f"{edge.max_gap:g} с")
@@ -47,8 +57,10 @@ def render(graph: GraphView) -> str:
     return "\n".join(lines)
 
 
-def format_match(match: MatchView) -> str:
+def format_match(match: MatchView, silence: float | None = None) -> str:
     """`✓ взлом, уверенность 0.85 — [<дверь> 0.90, 0.0 с] [<громкий звук> 0.80, 9.0 с]`:
-    у шага — его токен, уверенность и время."""
+    у шага — его токен, уверенность и время. `silence` — конец окна тишины, если сценарий
+    сработал по нему, без события."""
     steps = " ".join(f"[{step.token} {step.score:.2f}, {step.time} с]" for step in match.steps)
-    return f"✓ {match.scenario}, уверенность {match.confidence:.2f} — {steps}"
+    line = f"✓ {match.scenario}, уверенность {match.confidence:.2f} — {steps}"
+    return line if silence is None else f"{line} — тишина до {silence} с"

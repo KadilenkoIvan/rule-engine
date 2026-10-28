@@ -7,7 +7,7 @@
 
 from typing import NamedTuple
 
-from rule_engine.application.views import GraphView, NodeView, TokenEdge
+from rule_engine.application.views import GraphView, NodeView, SilenceEdge, TokenEdge
 
 CHAR = 7.9  # ширина знака моноширинного шрифта 13 px
 ROW = 36  # высота строки
@@ -27,6 +27,7 @@ class Box(NamedTuple):
     label: str
     label_x: float  # середина подписи
     scenario: str | None
+    silence: bool  # ребро-тишина
 
 
 class Layout(NamedTuple):
@@ -37,8 +38,13 @@ class Layout(NamedTuple):
     boxes: tuple[Box, ...]
 
 
-def label(edge: TokenEdge) -> str:
+def label(edge: TokenEdge | SilenceEdge) -> str:
     """Подпись ребра. Задержка и порог — там, где отличаются от корня."""
+    if isinstance(edge, SilenceEdge):
+        notes = [f"{edge.duration:g} с"]
+        if edge.min_score is not None:
+            notes.append(f"≥ {edge.min_score:g}")
+        return " · ".join([f"тишина: {', '.join(edge.tokens)}", *notes])
     notes = []
     if edge.max_gap is not None:
         notes.append(f"{edge.max_gap:g} с")
@@ -107,6 +113,7 @@ def layout(graph: GraphView) -> Layout:
                 label(node.edge),
                 (start + cx - RADIUS) / 2,
                 node.scenario,
+                isinstance(node.edge, SilenceEdge),
             )
         )
         end = cx + RADIUS
