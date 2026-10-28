@@ -16,12 +16,21 @@ class TokenEdge(NamedTuple):
     min_score: float | None
 
 
+class SilenceEdge(NamedTuple):
+    """Ребро-тишина. Порог — `None`, если совпадает с корнем правил."""
+
+    tokens: tuple[str, ...]  # запрещённые токены, по алфавиту
+    duration: float  # секунды вперёд
+    before: float  # секунды назад; 0 — назад не смотрит
+    min_score: float | None
+
+
 @dataclass(frozen=True)
 class NodeView:
     id: int  # номер вершины; по нему снимок совпадений ссылается на граф
-    segment: tuple[TokenEdge, ...]  # шаги сжатого ребра, ведущего в вершину
+    edge: TokenEdge | SilenceEdge  # ребро, которое ведёт в вершину
     scenario: str | None  # сценарий, чей шаблон кончается в вершине
-    children: tuple["NodeView", ...]
+    children: tuple["NodeView", ...]  # сначала за рёбрами-токенами, потом за рёбрами-тишинами
 
 
 class SlotView(NamedTuple):
@@ -61,38 +70,38 @@ class MatchView(NamedTuple):
 class WaitingView(NamedTuple):
     """Частичное совпадение, которое ждёт продолжения."""
 
-    kind: str  # "node" — в вершине бора, "set" — в наборе `any`
-    place: int  # id вершины или набора
+    # "node" — в вершине бора, "set" — в наборе `any`, "silence" — в окне тишины
+    kind: str
+    place: int  # id вершины или набора; у окна — id вершины за ребром-тишиной
     filled: frozenset[int]  # закрытые шаги набора; у вершины пусто
     steps: tuple[EventView, ...]
     confidence: float
     until: float  # срок продолжения
-    offset: int = 0  # число принятых шагов сжатого ребра; у any — 0
 
 
 class MissView(NamedTuple):
     """Почему событие не продвинуло совпадение или не дало сработать сценарию.
 
     `reason` и смысл `need` и `got` — как у `Miss` в движке: `"score"`, `"late"`, `"expired"`,
-    `"pruned"`, `"confidence"`, `"repeat"`, `"cooldown"`.
+    `"pruned"`, `"silence"`, `"confidence"`, `"repeat"`, `"cooldown"`.
     """
 
     reason: str
-    kind: str | None  # "node" или "set"; None — отказ сценария
-    place: int | None  # id вершины или набора; None — отказ сценария
+    kind: str | None  # "node", "set" или "silence"; None — отказ сценария
+    place: int | None  # id вершины или набора, у окна — вершины за ним; None — отказ сценария
     filled: frozenset[int]  # закрытые шаги набора; иначе пусто
     steps: tuple[EventView, ...]  # шаги совпадения; пусто — новое совпадение не началось
     scenario: str | None  # у отказов сценария
     need: float
     got: float
-    offset: int = 0  # позиция отказа внутри сжатого ребра
 
 
 @dataclass(frozen=True)
 class Frame:
-    """Состояние после события."""
+    """Состояние после события или после конца окна тишины, когда время прошло без события."""
 
-    event: EventView
+    time: float  # секунды: время события или конец окна
+    event: EventView | None  # None — кадр по таймеру
     matches: tuple[MatchView, ...]
     waiting: tuple[WaitingView, ...]
     misses: tuple[MissView, ...]  # что событие не продвинуло и почему

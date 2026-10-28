@@ -32,7 +32,8 @@ class CliInterface:
         with args.stream.open(encoding="utf-8") as lines:
             for frame in self._service.trace(rules, lines).frames:
                 for match in frame.matches:
-                    print(format_match(match))
+                    # кадр без события — конец окна тишины
+                    print(format_match(match, frame.time if frame.event is None else None))
                 waiting = len(frame.waiting)
         print(f"незавершённых совпадений в конце потока: {waiting}")
         return 0

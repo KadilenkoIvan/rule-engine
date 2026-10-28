@@ -7,10 +7,11 @@
 
 from typing import NamedTuple
 
-from rule_engine.application.views import GraphView, NodeView, TokenEdge
+from rule_engine.application.tokens import token_label
+from rule_engine.application.views import GraphView, NodeView, SilenceEdge, TokenEdge
 
 CHAR = 7.9  # ширина знака моноширинного шрифта 13 px
-ROW = 64  # место для позиций кандидатов и отказов внутри сжатого ребра
+ROW = 36  # высота строки
 RADIUS = 6
 PAD = 12  # поля подписи ребра слева и справа
 MARGIN = 20
@@ -27,7 +28,7 @@ class Box(NamedTuple):
     label: str
     label_x: float  # середина подписи
     scenario: str | None
-    length: int  # число шагов сжатого ребра
+    silence: bool  # ребро-тишина
 
 
 class Layout(NamedTuple):
@@ -38,14 +39,21 @@ class Layout(NamedTuple):
     boxes: tuple[Box, ...]
 
 
-def label(edge: TokenEdge) -> str:
+def label(edge: TokenEdge | SilenceEdge) -> str:
     """Подпись ребра. Задержка и порог — там, где отличаются от корня."""
+    if isinstance(edge, SilenceEdge):
+        notes = [f"{edge.duration:g} с"]
+        if edge.before:
+            notes.append(f"назад {edge.before:g} с")
+        if edge.min_score is not None:
+            notes.append(f"≥ {edge.min_score:g}")
+        return " · ".join([f"тишина: {', '.join(map(token_label, edge.tokens))}", *notes])
     notes = []
     if edge.max_gap is not None:
         notes.append(f"{edge.max_gap:g} с")
     if edge.min_score is not None:
         notes.append(f"≥ {edge.min_score:g}")
-    return " · ".join([edge.token, *notes])
+    return " · ".join([token_label(edge.token), *notes])
 
 
 def layout(graph: GraphView) -> Layout:
@@ -72,7 +80,7 @@ def layout(graph: GraphView) -> Layout:
     # ширина колонки — по самой длинной подписи ребра, которое в неё ведёт
     columns: dict[int, float] = {}
     for node in nodes:
-        text = len(" → ".join(label(edge) for edge in node.segment)) * CHAR
+        text = len(label(node.edge)) * CHAR
         columns[depths[node.id]] = max(columns.get(depths[node.id], 0.0), text)
     xs = [MARGIN + RADIUS]
     for depth in range(1, max(columns, default=0) + 1):
@@ -105,10 +113,10 @@ def layout(graph: GraphView) -> Layout:
                 cx,
                 cy,
                 path,
-                " → ".join(label(edge) for edge in node.segment),
+                label(node.edge),
                 (start + cx - RADIUS) / 2,
                 node.scenario,
-                len(node.segment),
+                isinstance(node.edge, SilenceEdge),
             )
         )
         end = cx + RADIUS

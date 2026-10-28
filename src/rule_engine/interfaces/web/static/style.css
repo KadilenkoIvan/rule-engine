@@ -178,6 +178,9 @@ button.primary {
 .edge .label { text-anchor: middle; }
 .edge.missed path { stroke: var(--error); stroke-width: 2; stroke-dasharray: 5 4; }
 .edge.missed .label { fill: var(--error); font-weight: 700; }
+.edge.silence path { stroke-dasharray: 2 4; }
+.edge.hush path { stroke: var(--warn); stroke-width: 3; }
+.edge.hush .label { fill: var(--warn); font-weight: 700; }
 .edge.passed path { stroke: var(--accent); stroke-width: 3; stroke-dasharray: none; }
 .edge.passed .label { fill: var(--accent); font-weight: 700; }
 .node circle { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
@@ -325,5 +328,3 @@ ul.fired li, .log li {
 .note.skip { color: var(--muted); }
 
 .panel.pending { opacity: 0.55; transition: opacity 0.15s; }
-.graph .radix-progress { text-anchor: middle; font: 11px var(--mono); fill: var(--accent); }
-.graph .radix-rejected { fill: var(--error); }
