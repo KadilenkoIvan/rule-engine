@@ -26,7 +26,8 @@ class Silence(NamedTuple):
     """Ребро-тишина: окно `duration` секунд без токенов `tokens` со score не ниже порога."""
 
     tokens: tuple[str, ...]  # по алфавиту: ребро не зависит от порядка в JSON
-    duration: float  # секунды от предыдущего шага, в обе стороны
+    duration: float  # секунды вперёд от предыдущего шага
+    before: float  # секунды назад от предыдущего шага; 0 — назад не смотрим
     min_score: float  # порог score запрещённых токенов
 
 
@@ -104,7 +105,7 @@ def edge_of(rules: RuleSet, scenario: Scenario, step: PatternStep | SilenceStep)
     """Ребро шага с действующими задержкой и порогом."""
     if isinstance(step, SilenceStep):
         return Silence(
-            tuple(sorted(step.absent)), step.duration, rules.threshold(scenario, step)
+            tuple(sorted(step.absent)), step.duration, step.before, rules.threshold(scenario, step)
         )
     return Edge(step.token, rules.gap(scenario, step), rules.threshold(scenario, step))
 
@@ -116,17 +117,18 @@ def branches(node: Node, edge: Edge | Silence) -> dict:
 
 def edge_label(edge: Edge | Silence) -> str:
     if isinstance(edge, Silence):
-        return f"тишина {list(edge.tokens)} {edge.duration:g} с"
+        before = f", назад {edge.before:g} с" if edge.before else ""
+        return f"тишина {list(edge.tokens)} {edge.duration:g} с{before}"
     return edge.token
 
 
-def longest_silence(starts: dict[Start, Node]) -> float:
-    """Самое длинное окно тишины в боре; 0, если тишины нет."""
+def longest_before(starts: dict[Start, Node]) -> float:
+    """Самое длинное окно тишины назад в боре; 0, если назад не смотрит ни одна тишина."""
 
     def walk(node: Node) -> float:
         return max(
             (
-                max(edge.duration, walk(child)) if isinstance(edge, Silence) else walk(child)
+                max(edge.before, walk(child)) if isinstance(edge, Silence) else walk(child)
                 for edge, child in (*node.children.items(), *node.silences.items())
             ),
             default=0.0,

@@ -20,7 +20,8 @@ class SilenceEdge(NamedTuple):
     """Ребро-тишина. Порог — `None`, если совпадает с корнем правил."""
 
     tokens: tuple[str, ...]  # запрещённые токены, по алфавиту
-    duration: float  # секунды
+    duration: float  # секунды вперёд
+    before: float  # секунды назад; 0 — назад не смотрит
     min_score: float | None
 
 

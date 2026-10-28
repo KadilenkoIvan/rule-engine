@@ -130,7 +130,7 @@ def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
     def edge_view(edge: Start | Edge | Silence) -> TokenEdge | SilenceEdge:
         min_score = None if edge.min_score == rules.min_score else edge.min_score
         if isinstance(edge, Silence):
-            return SilenceEdge(edge.tokens, edge.duration, min_score)
+            return SilenceEdge(edge.tokens, edge.duration, edge.before, min_score)
         if isinstance(edge, Start) or edge.max_gap == rules.max_gap:
             return TokenEdge(edge.token, None, min_score)
         return TokenEdge(edge.token, edge.max_gap, min_score)

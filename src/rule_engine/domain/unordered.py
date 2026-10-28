@@ -2,7 +2,7 @@
 
 from typing import NamedTuple
 
-from rule_engine.domain.rules import RuleSet
+from rule_engine.domain.rules import RuleSet, fits
 
 
 class Slot(NamedTuple):
@@ -18,18 +18,21 @@ class Unordered(NamedTuple):
     max_gap: float  # секунды между соседними по времени шагами
     min_confidence: float  # порог общей уверенности сценария
 
-    def free(self, filled: frozenset[int], token: str, score: float) -> list[int]:
+    def free(
+        self, filled: frozenset[int], token: str, score: float, vocabulary: frozenset[str]
+    ) -> list[int]:
         """Номера шагов, которые событие может закрыть, если шаги `filled` уже закрыты.
 
         Каждый шаг забирает своё событие, поэтому `[<шаги>, <шаги>]` ждёт два разных `<шаги>`.
         Из одинаковых шагов закрывается первый незакрытый: иначе одно и то же совпадение стояло
-        бы в двух состояниях, {первый <шаги>} и {второй <шаги>}.
+        бы в двух состояниях, {первый <шаги>} и {второй <шаги>}. Разные шаги, к которым подходит
+        токен (`<шаги>` и `any`), дают разные состояния.
         """
         return [
             index
             for index, slot in enumerate(self.slots)
             if index not in filled
-            and slot.token == token
+            and fits(slot.token, token, vocabulary)
             and score >= slot.min_score
             and all(earlier in filled for earlier in range(index) if self.slots[earlier] == slot)
         ]

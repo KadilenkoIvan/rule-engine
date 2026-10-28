@@ -1,5 +1,6 @@
 """Текст для командной строки: граф деревом и строки срабатываний."""
 
+from rule_engine.application.tokens import token_label
 from rule_engine.application.views import (
     GraphView,
     MatchView,
@@ -16,14 +17,17 @@ def render(graph: GraphView) -> str:
 
     def label(edge: TokenEdge | SilenceEdge) -> str:
         if isinstance(edge, SilenceEdge):
-            text = f"тишина {edge.duration:g} с: {', '.join(edge.tokens)}"
+            before = f", назад {edge.before:g} с" if edge.before else ""
+            tokens = ", ".join(map(token_label, edge.tokens))
+            text = f"тишина {edge.duration:g} с{before}: {tokens}"
             return text if edge.min_score is None else f"{text} [≥ {edge.min_score:g}]"
         notes = []
         if edge.max_gap is not None:
             notes.append(f"{edge.max_gap:g} с")
         if edge.min_score is not None:
             notes.append(f"≥ {edge.min_score:g}")
-        return f"{edge.token} [{', '.join(notes)}]" if notes else edge.token
+        token = token_label(edge.token)
+        return f"{token} [{', '.join(notes)}]" if notes else token
 
     def walk(nodes: tuple[NodeView, ...], indent: str) -> None:
         for index, node in enumerate(nodes):
@@ -36,9 +40,9 @@ def render(graph: GraphView) -> str:
         # одинаковые у всех шагов пороги показаны один раз, после набора
         common = len({slot.min_score for slot in pattern.slots}) == 1
         tokens = ", ".join(
-            slot.token
+            token_label(slot.token)
             if common or slot.min_score is None
-            else f"{slot.token} [≥ {slot.min_score:g}]"
+            else f"{token_label(slot.token)} [≥ {slot.min_score:g}]"
             for slot in pattern.slots
         )
         notes = []
