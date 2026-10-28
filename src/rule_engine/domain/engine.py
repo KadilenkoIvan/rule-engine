@@ -1,11 +1,11 @@
 """Проход потока токенов по графу сценариев и по шаблонам `any`."""
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from rule_engine.domain.graph import Node, Start, build_graph, insert_scenario
+from rule_engine.domain.graph import Cursor, Node, Start, build_graph, insert_scenario
 from rule_engine.domain.rules import RuleSet, Scenario, parse_scenario
 from rule_engine.domain.unordered import Unordered, build_unordered, insert_unordered
 
@@ -35,29 +35,65 @@ class Match:
     confidence: float  # общая уверенность: среднее геометрическое score шагов
 
 
-class Partial(NamedTuple):
-    """Частичное совпадение: его шаги и произведение их score."""
+@dataclass(frozen=True, slots=True)
+class History:
+    """Неизменяемое звено: общие префиксы кандидатов не копируются."""
 
-    steps: tuple[Step, ...]
+    step: Step
+    previous: "History | None" = None
+
+
+class Partial(NamedTuple):
+    """История по ссылке и метаданные для O(1) продления и сравнения."""
+
+    tail: History
     product: float
+    count: int
+    first_position: int
+
+    @classmethod
+    def begin(cls, step: Step) -> "Partial":
+        return cls(History(step), step.event.score, 1, step.position)
+
+    def backwards(self) -> Iterator[Step]:
+        link = self.tail
+        while link is not None:
+            yield link.step
+            link = link.previous
+
+    @property
+    def steps(self) -> tuple[Step, ...]:
+        """Материализация нужна только для результата и представления интерфейса."""
+        steps = list(self.backwards())
+        steps.reverse()
+        return tuple(steps)
+
+    @property
+    def last(self) -> Step:
+        return self.tail.step
 
     @property
     def confidence(self) -> float:
         """Среднее геометрическое score шагов."""
-        return self.product ** (1 / len(self.steps))
+        return self.product ** (1 / self.count)
 
     def bound(self, length: int) -> float:
         """Уверенность в шаблоне длины `length`, если у оставшихся шагов score 1.0: выше не бывает."""
         return self.product ** (1 / length)
 
     def extend(self, step: Step) -> "Partial":
-        return Partial(self.steps + (step,), self.product * step.event.score)
+        return Partial(
+            History(step, self.tail),
+            self.product * step.event.score,
+            self.count + 1,
+            self.first_position,
+        )
 
 
 class Waiting(NamedTuple):
     """Частичное совпадение в снимке движка: где оно стоит и до какого момента ждёт."""
 
-    place: Node | tuple[Unordered, frozenset[int]]  # вершина бора или (шаблон `any`, закрытые шаги)
+    place: Cursor | tuple[Unordered, frozenset[int]]
     partial: Partial
     until: float  # секунды: срок продолжения
 
@@ -81,7 +117,7 @@ class Miss(NamedTuple):
     """
 
     reason: str
-    place: Node | tuple[Unordered, frozenset[int]] | None
+    place: Cursor | tuple[Unordered, frozenset[int]] | None
     partial: Partial | None
     scenario: str | None
     need: float
@@ -94,9 +130,9 @@ def dominates(a: Partial, b: Partial) -> bool:
     Тогда любое продолжение `b` есть и у `a`, со сроком не раньше и уверенностью не ниже. Если
     равны и последний шаг, и произведение, остаётся начавшееся позже.
     """
-    if (a.steps[-1].position, a.product) == (b.steps[-1].position, b.product):
-        return a.steps[0].position >= b.steps[0].position
-    return a.steps[-1].position >= b.steps[-1].position and a.product >= b.product
+    if (a.last.position, a.product) == (b.last.position, b.product):
+        return a.first_position >= b.first_position
+    return a.last.position >= b.last.position and a.product >= b.product
 
 
 def keep(partials: list[Partial], partial: Partial) -> None:
@@ -144,8 +180,10 @@ class Engine:
       этого сценария прошло меньше его `cooldown`. Невыданное срабатывание не занимает токены
       и не продлевает cooldown, а совпадение живёт дальше.
     - Время событий не убывает: событие раньше предыдущего — ошибка.
-    - `add_scenario` дописывает пути в общий бор. Активные совпадения могут продолжаться по
-      добавленным веткам.
+    - Неразветвлённые цепочки сжаты в radix-рёбра; кандидат занимает позицию внутри ребра.
+      История хранится связно: продление создаёт одно звено, не копируя общий префикс.
+    - `add_scenario` дописывает пути, при необходимости расщепляя radix-рёбра. Активные
+      совпадения сохраняют позиции и могут продолжаться по добавленным веткам.
     """
 
     def __init__(self, rules: RuleSet) -> None:
@@ -161,7 +199,7 @@ class Engine:
             (tuple(sorted(pattern.slots)), pattern.max_gap): pattern.scenario
             for pattern in self._unordered
         }
-        self._active: dict[Node, list[Partial]] = {}  # вершина → несравнимые совпадения в ней
+        self._active: dict[Cursor, list[Partial]] = {}  # позиция в radix trie → кандидаты
         # (шаблон `any`, номера закрытых шагов) → несравнимые совпадения в этом состоянии
         self._sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
@@ -195,7 +233,23 @@ class Engine:
             self._defaults.min_confidence,
         )
         if scenario.order == "sequence":
-            insert_scenario(self._starts, rules, scenario)
+            splits = insert_scenario(self._starts, rules, scenario)
+            # При расщеплении сжатого ребра курсоры сохраняют логическую позицию.
+            for old, prefix, cut in splits:
+
+                def relocate(place: Cursor | tuple[Unordered, frozenset[int]] | None):
+                    if isinstance(place, Cursor) and place.node is old:
+                        return (
+                            Cursor(prefix, place.offset)
+                            if place.offset <= cut
+                            else Cursor(old, place.offset - cut)
+                        )
+                    return place
+
+                self._active = {
+                    relocate(place): partials for place, partials in self._active.items()
+                }
+                self._misses = [miss._replace(place=relocate(miss.place)) for miss in self._misses]
         else:
             insert_unordered(self._unordered, self._unordered_owners, rules)
         self._cooldowns[scenario.name] = scenario.cooldown
@@ -234,18 +288,16 @@ class Engine:
 
     def snapshot(self) -> list[Waiting]:
         """Все частичные совпадения: в вершинах бора и в наборах `any`."""
-        # в `_active` стоят только вершины с рёбрами: в остальных ждать нечего
-        waiting = [
-            Waiting(
-                node,
-                partial,
-                partial.steps[-1].event.time + max(edge.max_gap for edge in node.children),
+        # В `_active` только позиции с продолжениями; внутри ребра следующий шаг один.
+        waiting = []
+        for cursor, partials in self._active.items():
+            gap = max(edge.max_gap for edge, _ in cursor.transitions())
+            waiting.extend(
+                Waiting(cursor, partial, partial.last.event.time + gap)
+                for partial in partials
             )
-            for node, partials in self._active.items()
-            for partial in partials
-        ]
         waiting += [
-            Waiting(key, partial, partial.steps[-1].event.time + key[0].max_gap)
+            Waiting(key, partial, partial.last.event.time + key[0].max_gap)
             for key, partials in self._sets.items()
             for partial in partials
         ]
@@ -267,12 +319,12 @@ class Engine:
         self._position += 1
 
         matches: list[Match] = []
-        active: dict[Node, list[Partial]] = {}
+        active: dict[Cursor, list[Partial]] = {}
         sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
         completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
         misses: list[Miss] = []
 
-        def enter(node: Node, partial: Partial) -> None:
+        def enter(node: Cursor, partial: Partial) -> None:
             if node.scenario is not None:
                 completed.setdefault(node.scenario, []).append(partial)
             # ранний отсев; у вершины без продолжений `ahead` пуст, и совпадение в ней не остаётся
@@ -317,7 +369,7 @@ class Engine:
                 partial
                 for partial in partials
                 if partial.confidence >= self._min_confidences[scenario]
-                and taken.isdisjoint(position for position, _ in partial.steps)
+                and taken.isdisjoint(step.position for step in partial.backwards())
             ]
             if not eligible:
                 # уверенность ниже порога или повтор: токен уже вошёл в выданное срабатывание
@@ -331,28 +383,30 @@ class Engine:
                     else:
                         misses.append(Miss("repeat", None, partial, scenario, 0.0, 0.0))
                 return
-            best = max(eligible, key=lambda partial: (partial.confidence, partial.steps[0].position))
+            best = max(eligible, key=lambda partial: (partial.confidence, partial.first_position))
             fired_at = self._fired_at.get(scenario)
             if fired_at is not None and event.time - fired_at < self._cooldowns[scenario]:
                 until = fired_at + self._cooldowns[scenario]
                 misses.append(Miss("cooldown", None, best, scenario, until, event.time))
                 return
-            taken.update(position for position, _ in best.steps)
+            taken.update(step.position for step in best.backwards())
             self._fired_at[scenario] = event.time
             matches.append(Match(scenario, best.steps, best.confidence))
 
         for node, partials in self._active.items():
+            transitions = tuple(node.transitions())
+            max_gap = max(edge.max_gap for edge, _ in transitions)
             for partial in partials:
                 # срок считается от последнего шага совпадения, а не от последнего токена потока
-                last = partial.steps[-1].event.time
+                last = partial.last.event.time
                 elapsed = event.time - last
                 # сроки всех рёбер из вершины истекли: совпадение снято
-                expired = all(elapsed > edge.max_gap for edge in node.children)
+                expired = elapsed > max_gap
                 if not expired:
                     # копия остаётся в вершине и ждёт другого продолжения
                     keep(active.setdefault(node, []), partial)
                 fits = False  # есть ребро с токеном события: снятие объясняет опоздание
-                for edge, child in node.children.items():
+                for edge, child in transitions:
                     if edge.token != event.token:
                         continue
                     fits = True
@@ -367,18 +421,18 @@ class Engine:
                     else:
                         enter(child, partial.extend(step))
                 if expired and not fits:
-                    deadline = last + max(edge.max_gap for edge in node.children)
+                    deadline = last + max_gap
                     misses.append(Miss("expired", node, partial, None, deadline, event.time))
         for start, child in self._starts.items():
             if start.token != event.token:
                 continue
             if event.score >= start.min_score:
-                enter(child, Partial((step,), event.score))  # новое совпадение задержку не проверяет
+                enter(Cursor(child, 1), Partial.begin(step))
             else:
-                misses.append(Miss("score", child, None, None, start.min_score, event.score))
+                misses.append(Miss("score", Cursor(child, 1), None, None, start.min_score, event.score))
         for (pattern, filled), partials in self._sets.items():
             for partial in partials:
-                deadline = partial.steps[-1].event.time + pattern.max_gap
+                deadline = partial.last.event.time + pattern.max_gap
                 if event.time > deadline:
                     # задержка у открытых шагов одна, и она истекла: совпадение снято
                     reason = "late" if pattern.free(filled, event.token, 1.0) else "expired"
@@ -397,7 +451,7 @@ class Engine:
         for pattern in self._unordered:
             # начать набор может любой его шаг
             for index in pattern.free(frozenset(), event.token, event.score):
-                collect(pattern, frozenset({index}), Partial((step,), event.score))
+                collect(pattern, frozenset({index}), Partial.begin(step))
             for index in low_slots(pattern, frozenset()):
                 threshold = pattern.slots[index].min_score
                 misses.append(
@@ -414,7 +468,7 @@ class Engine:
         # совпадения, более ранние можно забыть
         oldest = min(
             (
-                partial.steps[0].position
+                partial.first_position
                 for partials in (*active.values(), *sets.values())
                 for partial in partials
             ),

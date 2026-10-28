@@ -19,7 +19,7 @@ class TokenEdge(NamedTuple):
 @dataclass(frozen=True)
 class NodeView:
     id: int  # номер вершины; по нему снимок совпадений ссылается на граф
-    edge: TokenEdge  # ребро, которое ведёт в вершину
+    segment: tuple[TokenEdge, ...]  # шаги сжатого ребра, ведущего в вершину
     scenario: str | None  # сценарий, чей шаблон кончается в вершине
     children: tuple["NodeView", ...]
 
@@ -67,6 +67,7 @@ class WaitingView(NamedTuple):
     steps: tuple[EventView, ...]
     confidence: float
     until: float  # срок продолжения
+    offset: int = 0  # число принятых шагов сжатого ребра; у any — 0
 
 
 class MissView(NamedTuple):
@@ -84,6 +85,7 @@ class MissView(NamedTuple):
     scenario: str | None  # у отказов сценария
     need: float
     got: float
+    offset: int = 0  # позиция отказа внутри сжатого ребра
 
 
 @dataclass(frozen=True)

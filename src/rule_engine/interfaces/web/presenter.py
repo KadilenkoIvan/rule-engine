@@ -28,9 +28,11 @@ class State(NamedTuple):
     fired_sets: set[int]
     missed: set[int]  # вершины, ребро в которые не пустило токен: порог или опоздание
     missed_sets: set[int]  # наборы, которые не пустили токен
+    progress: dict[int, dict[int, int]]  # ребро → offset → число кандидатов
+    rejected: dict[int, set[int]]  # ребро → позиции отказов
 
 
-EMPTY = State({}, set(), set(), {}, set(), set(), set())
+EMPTY = State({}, set(), set(), {}, set(), set(), set(), {}, {})
 
 # причина отказа → метка и класс строки: порог уверенности, время, повтор
 REASONS = {
@@ -70,7 +72,7 @@ class Paths:
 
         def walk(node: NodeView, parent: int | None, tokens: tuple[str, ...]) -> None:
             self.parents[node.id] = parent
-            self.tokens[node.id] = (*tokens, node.edge.token)
+            self.tokens[node.id] = (*tokens, *(edge.token for edge in node.segment))
             self.nodes[node.id] = node
             for child in node.children:
                 walk(child, node.id, self.tokens[node.id])
@@ -106,11 +108,16 @@ class Paths:
         return nodes, sets
 
     def state(self, frame: Frame) -> State:
-        state = State({}, set(), set(), {}, set(), set(), set())
+        state = State({}, set(), set(), {}, set(), set(), set(), {}, {})
         for item in frame.waiting:
             if item.kind == "node":
-                state.active[item.place] = state.active.get(item.place, 0) + 1
-                state.passed.update(self.up(item.place))
+                offsets = state.progress.setdefault(item.place, {})
+                offsets[item.offset] = offsets.get(item.offset, 0) + 1
+                if item.offset == len(self.nodes[item.place].segment):
+                    state.active[item.place] = state.active.get(item.place, 0) + 1
+                    state.passed.update(self.up(item.place))
+                else:
+                    state.passed.update(self.up(self.parents[item.place]))
             else:
                 state.sets.setdefault(item.place, []).append(item)
         for match in frame.matches:
@@ -122,6 +129,7 @@ class Paths:
         for miss in frame.misses:
             if miss.reason in ("score", "late") and miss.kind == "node":
                 state.missed.add(miss.place)
+                state.rejected.setdefault(miss.place, set()).add(miss.offset)
             elif miss.reason in ("score", "late") and miss.kind == "set":
                 state.missed_sets.add(miss.place)
         return state
@@ -154,7 +162,8 @@ class Paths:
                 return f"набор {name} не начался с «{token}»: {score}"
             why = late if miss.reason == "late" else score
             return f"набор {name} не закрыл шаг «{token}»: {why}"
-        path = " → ".join(self.tokens[miss.place])
+        tokens = self.prefix(miss.place, miss.offset)
+        path = " → ".join(tokens)
         if miss.reason == "expired":
             return f"«{path}» снято: ждало продолжения до {miss.need:g}"
         if miss.reason == "pruned":
@@ -164,7 +173,7 @@ class Paths:
             )
         if not miss.steps:
             return f"новое совпадение с «{token}» не началось: {score}"
-        before = " → ".join(self.tokens[miss.place][:-1])
+        before = " → ".join(tokens[:-1])
         why = late if miss.reason == "late" else score
         return f"«{before}» не пошло дальше по «{token}»: {why}"
 
@@ -193,7 +202,12 @@ class Paths:
         if item.kind == "set":
             pattern = self.graph.sets[item.place]
             return f"{{{', '.join(slot.token for slot in pattern.slots)}}} → {pattern.scenario}"
-        return " → ".join(self.tokens[item.place])
+        path = " → ".join(self.prefix(item.place, item.offset))
+        return f"{path} (шаг {item.offset}/{len(self.nodes[item.place].segment)} ребра)"
+
+    def prefix(self, place: int, offset: int) -> tuple[str, ...]:
+        tokens = self.tokens[place]
+        return tokens[:len(tokens) - len(self.nodes[place].segment) + offset]
 
 
 class Presenter:

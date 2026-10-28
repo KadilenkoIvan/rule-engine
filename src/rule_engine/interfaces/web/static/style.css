@@ -325,3 +325,5 @@ ul.fired li, .log li {
 .note.skip { color: var(--muted); }
 
 .panel.pending { opacity: 0.55; transition: opacity 0.15s; }
+.graph .radix-progress { text-anchor: middle; font: 11px var(--mono); fill: var(--accent); }
+.graph .radix-rejected { fill: var(--error); }

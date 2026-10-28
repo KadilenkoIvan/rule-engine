@@ -10,6 +10,12 @@
   <g class="edge{% if box.id in state.missed %} missed{% endif %}{% if box.id in state.passed %} passed{% endif %}">
     <path d="{{ box.path }}"/>
     <text class="label" x="{{ box.label_x|g }}" y="{{ (box.y - 8)|g }}">{{ box.label }}</text>
+    {% if box.id in state.progress %}
+    <text class="radix-progress" x="{{ box.label_x|g }}" y="{{ (box.y + 17)|g }}">{% for offset, count in state.progress[box.id]|dictsort %}{% if not loop.first %} · {% endif %}{{ offset }}/{{ box.length }} ×{{ count }}{% endfor %}</text>
+    {% endif %}
+    {% if box.id in state.rejected %}
+    <text class="radix-progress radix-rejected" x="{{ box.label_x|g }}" y="{{ (box.y + 30)|g }}">отказ: {% for offset in state.rejected[box.id]|sort %}{% if not loop.first %}, {% endif %}{{ offset }}/{{ box.length }}{% endfor %}</text>
+    {% endif %}
   </g>
   {% endfor %}
   {% for box in lay.boxes %}

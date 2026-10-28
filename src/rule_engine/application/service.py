@@ -21,7 +21,7 @@ from rule_engine.application.views import (
     WaitingView,
 )
 from rule_engine.domain.engine import Engine, Miss, Step, Waiting
-from rule_engine.domain.graph import Edge, Node, Start
+from rule_engine.domain.graph import Cursor, Edge, Node, Start
 from rule_engine.domain.rules import RuleSet
 from rule_engine.domain.unordered import Unordered
 
@@ -108,12 +108,12 @@ def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
             return TokenEdge(edge.token, None, min_score)
         return TokenEdge(edge.token, edge.max_gap, min_score)
 
-    def node_view(edge: Start | Edge, node: Node) -> NodeView:
+    def node_view(node: Node) -> NodeView:
         nodes[node] = len(nodes)
-        children = tuple(node_view(child_edge, child) for child_edge, child in node.children.items())
-        return NodeView(nodes[node], edge_view(edge), node.scenario, children)
+        children = tuple(node_view(child) for child in node.children.values())
+        return NodeView(nodes[node], tuple(map(edge_view, node.segment)), node.scenario, children)
 
-    roots = tuple(node_view(start, node) for start, node in engine.starts.items())
+    roots = tuple(node_view(node) for node in engine.starts.values())
     sets = {pattern: number for number, pattern in enumerate(engine.unordered)}
     set_views = tuple(
         SetView(
@@ -138,9 +138,9 @@ def event_view(step: Step) -> EventView:
 def waiting_view(item: Waiting, index: Index) -> WaitingView:
     steps = tuple(map(event_view, item.partial.steps))
     confidence = item.partial.confidence
-    if isinstance(item.place, Node):
-        node = index.nodes[item.place]
-        return WaitingView("node", node, frozenset(), steps, confidence, item.until)
+    if isinstance(item.place, Cursor):
+        node = index.nodes[item.place.node]
+        return WaitingView("node", node, frozenset(), steps, confidence, item.until, item.place.offset)
     pattern, filled = item.place
     return WaitingView("set", index.sets[pattern], filled, steps, confidence, item.until)
 
@@ -149,9 +149,10 @@ def miss_view(miss: Miss, index: Index) -> MissView:
     steps = () if miss.partial is None else tuple(map(event_view, miss.partial.steps))
     if miss.place is None:
         kind, place, filled = None, None, frozenset()
-    elif isinstance(miss.place, Node):
-        kind, place, filled = "node", index.nodes[miss.place], frozenset()
+    elif isinstance(miss.place, Cursor):
+        kind, place, filled = "node", index.nodes[miss.place.node], frozenset()
     else:
         pattern, filled = miss.place
         kind, place = "set", index.sets[pattern]
-    return MissView(miss.reason, kind, place, filled, steps, miss.scenario, miss.need, miss.got)
+    offset = miss.place.offset if isinstance(miss.place, Cursor) else 0
+    return MissView(miss.reason, kind, place, filled, steps, miss.scenario, miss.need, miss.got, offset)

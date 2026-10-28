@@ -19,7 +19,8 @@ def render(graph: GraphView) -> str:
         for index, node in enumerate(nodes):
             last = index == len(nodes) - 1
             mark = f"  ⇒ {node.scenario}" if node.scenario is not None else ""
-            lines.append(f"{indent}{'└─ ' if last else '├─ '}{label(node.edge)}{mark}")
+            segment = " → ".join(label(edge) for edge in node.segment)
+            lines.append(f"{indent}{'└─ ' if last else '├─ '}{segment}{mark}")
             walk(node.children, indent + ("   " if last else "│  "))
 
     def label_set(pattern: SetView) -> str:
