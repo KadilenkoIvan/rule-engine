@@ -824,6 +824,10 @@ uv run rule-engine cli run examples/smart_home.json examples/silence.txt     # �
 uv run rule-engine cli run examples/nanny.json examples/nanny.txt            # радио-няня: any, any_vac
 uv run rule-engine web examples                                              # всё то же в браузере
 uv run pytest tests/test_timer_wheel.py                                      # колесо таймеров
+uv run pytest                                                               # все тесты
 ```
 
-Остальные тесты в `tests/` отстали от API и падают при сборке.
+Тесты покрывают правила, radix-сжатие и динамические вставки, связные истории,
+тишину и её границы, wildcard-шаги, наборы `any`, таймеры и `LiveEngine`.
+Случайные потоки с фиксированными seed дополнительно
+сравниваются на сжатом и развёрнутом деревьях.
