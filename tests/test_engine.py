@@ -78,7 +78,7 @@ def test_equal_scores_leave_at_most_one_candidate_per_cursor():
     engine = Engine(RULES)
     for index in range(5000):
         engine.push(Event(rng.choice(vocabulary), 0.9, index * 0.25))
-        assert all(len(partials) == 1 for partials in engine._active.values())
+        assert all(len(front) == 1 for front in engine._fronts.values())
 
 
 def test_unknown_token_is_skipped_but_keeps_its_position():

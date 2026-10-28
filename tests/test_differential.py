@@ -79,16 +79,19 @@ def random_scenario(rng, name, extra=()):
     return scenario
 
 
-def random_rules(rng):
+def random_rules(rng, count=7):
+    """Случайные правила без конфликтов: одинаковые шаблоны ловят и проверка правил, и бор."""
     while True:
-        scenarios = [random_scenario(rng, f"s{index}") for index in range(rng.randint(1, 7))]
+        scenarios = [random_scenario(rng, f"s{index}") for index in range(rng.randint(1, count))]
         try:
-            return RuleSet.from_dict({
+            rules = RuleSet.from_dict({
                 "max_gap": 2.0, "min_score": 0.3, "min_confidence": 0.3,
                 "vocabulary": [*TOKENS, "e", "x"], "scenarios": scenarios,
             })
+            ReferenceEngine(rules)
         except ValueError:
             continue
+        return rules
 
 
 def paths(engine):

@@ -117,6 +117,12 @@ class Cursor(NamedTuple):
             for edge, child in self.node.children.items():
                 yield edge, Cursor(child, 1)
 
+    def follow(self, edge: Edge) -> "Cursor":
+        """Позиция за переходом `edge` отсюда."""
+        if self.offset < len(self.node.segment):
+            return Cursor(self.node, self.offset + 1)
+        return Cursor(self.node.children[edge], 1)
+
     def silences(self) -> Iterator[Silence]:
         if self.offset == len(self.node.segment):
             yield from self.node.silences
