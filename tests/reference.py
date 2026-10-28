@@ -148,8 +148,7 @@ class ReferenceEngine:
             self._defaults.min_confidence,
         )
         if scenario.order == "sequence":
-            splits = insert_scenario(self._starts, rules, scenario)
-            for old, prefix, cut in splits:
+            for old, prefix, cut in insert_scenario(self._starts, rules, scenario).splits:
 
                 def relocate(place: Place | None) -> Place | None:
                     if isinstance(place, Cursor) and place.node is old:

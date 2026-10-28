@@ -37,6 +37,20 @@ class Unordered(NamedTuple):
             and all(earlier in filled for earlier in range(index) if self.slots[earlier] == slot)
         ]
 
+    def groups(self) -> dict[str, list[tuple[float, int]]]:
+        """Токен шага → (порог, маска номеров) для каждой группы одинаковых шагов.
+
+        Правило `free` на масках: из группы событие закрывает первый незакрытый шаг — младший бит
+        `маска & ~закрытые`.
+        """
+        masks: dict[Slot, int] = {}
+        for index, slot in enumerate(self.slots):
+            masks[slot] = masks.get(slot, 0) | 1 << index
+        groups: dict[str, list[tuple[float, int]]] = {}
+        for slot, mask in masks.items():
+            groups.setdefault(slot.token, []).append((slot.min_score, mask))
+        return groups
+
 
 def build_unordered(rules: RuleSet) -> list[Unordered]:
     """Шаблоны сценариев с `order: "any"`. Один набор у двух сценариев — ошибка, как в боре."""

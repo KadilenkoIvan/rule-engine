@@ -22,6 +22,7 @@ from rule_engine.domain.rules import (
     Scenario,
     SilenceStep,
     fits,
+    fitting,
     parse_scenario,
     step_tokens,
 )
@@ -202,6 +203,33 @@ def keep(partials: list[Partial], partial: Partial) -> None:
     partials.append(partial)
 
 
+class Collector:
+    """Шаблон `any` в движке: закрытые шаги — битовая маска, одинаковые шаги — одна группа."""
+
+    __slots__ = ("pattern", "groups", "full")
+
+    def __init__(self, pattern: Unordered) -> None:
+        self.pattern = pattern
+        self.groups = pattern.groups()  # токен шага → (порог, маска номеров) групп
+        self.full = (1 << len(pattern.slots)) - 1  # маска собранного шаблона
+
+    def free(self, filled: int, token: str, score: float, vocabulary: frozenset[str]) -> list[int]:
+        """`Unordered.free` на масках: номера шагов, которые событие может закрыть."""
+        free = []
+        for key in fitting(token, vocabulary):
+            for min_score, mask in self.groups.get(key, ()):
+                open_ = mask & ~filled
+                if open_ and score >= min_score:
+                    free.append((open_ & -open_).bit_length() - 1)
+        free.sort()
+        return free
+
+    def place(self, filled: int) -> tuple[Unordered, frozenset[int]]:
+        """Состояние так, как его видят снимок и отказы: шаблон и номера закрытых шагов."""
+        slots = range(len(self.pattern.slots))
+        return self.pattern, frozenset(index for index in slots if filled >> index & 1)
+
+
 def before_of(scenario: Scenario) -> float:
     """Самое длинное окно тишины назад у сценария; 0, если назад не смотрит ни одна тишина."""
     return max(
@@ -291,9 +319,10 @@ class Engine:
             (tuple(sorted(pattern.slots)), pattern.max_gap): pattern.scenario
             for pattern in self._unordered
         }
+        self._collectors = [Collector(pattern) for pattern in self._unordered]
         self._active: dict[Cursor, list[Partial]] = {}  # позиция radix trie → кандидаты
-        # (шаблон `any`, номера закрытых шагов) → несравнимые совпадения в этом состоянии
-        self._sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
+        # (шаблон `any`, маска закрытых шагов) → несравнимые совпадения в этом состоянии
+        self._sets: dict[tuple[Collector, int], list[Partial]] = {}
         self._wheel: TimerWheel[Hush] = TimerWheel()  # сроки окон тишины
         self._hushes: dict[Timer[Hush], None] = {}  # открытые окна в порядке открытия
         self._lookback = longest_before(self._starts)  # секунды: самое длинное окно назад
@@ -332,8 +361,8 @@ class Engine:
             self._defaults.min_confidence,
         )
         if scenario.order == "sequence":
-            splits = insert_scenario(self._starts, rules, scenario)
-            for old, prefix, cut in splits:
+            changes = insert_scenario(self._starts, rules, scenario)
+            for old, prefix, cut in changes.splits:
 
                 def relocate(place: Place | None) -> Place | None:
                     if isinstance(place, Cursor) and place.node is old:
@@ -350,7 +379,9 @@ class Engine:
                 self._misses = [miss._replace(place=relocate(miss.place)) for miss in self._misses]
             # Концы старых рёбер сохраняют identity и silences: Window и Timer не меняются.
         else:
+            known = len(self._unordered)
             insert_unordered(self._unordered, self._unordered_owners, rules)
+            self._collectors += [Collector(pattern) for pattern in self._unordered[known:]]
         self._cooldowns[scenario.name] = scenario.cooldown
         self._declared[scenario.name] = len(self._declared)
         self._min_confidences[scenario.name] = rules.confidence_threshold(scenario)
@@ -404,8 +435,8 @@ class Engine:
                 Waiting(cursor, partial, partial.last_time + gap) for partial in partials
             )
         waiting += [
-            Waiting(key, partial, partial.last_time + key[0].max_gap)
-            for key, partials in self._sets.items()
+            Waiting(collector.place(filled), partial, partial.last_time + collector.pattern.max_gap)
+            for (collector, filled), partials in self._sets.items()
             for partial in partials
         ]
         waiting += [
@@ -442,20 +473,21 @@ class Engine:
         self._position += 1
 
         active: dict[Cursor, list[Partial]] = {}
-        sets: dict[tuple[Unordered, frozenset[int]], list[Partial]] = {}
+        sets: dict[tuple[Collector, int], list[Partial]] = {}
         completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
 
-        def collect(pattern: Unordered, filled: frozenset[int], partial: Partial) -> None:
+        def collect(collector: Collector, filled: int, partial: Partial) -> None:
+            pattern = collector.pattern
             length = len(pattern.slots)
-            if len(filled) == length:
+            if filled == collector.full:
                 completed.setdefault(pattern.scenario, []).append(partial)
             elif partial.bound(length) >= pattern.min_confidence:  # ранний отсев
-                keep(sets.setdefault((pattern, filled), []), partial)
+                keep(sets.setdefault((collector, filled), []), partial)
             else:
                 misses.append(
                     Miss(
                         "pruned",
-                        (pattern, filled),
+                        collector.place(filled),
                         partial,
                         None,
                         pattern.min_confidence,
@@ -463,12 +495,12 @@ class Engine:
                     )
                 )
 
-        def low_slots(pattern: Unordered, filled: frozenset[int]) -> list[int]:
+        def low_slots(collector: Collector, filled: int) -> list[int]:
             """Открытые шаги набора с токеном события, порог которых событие не прошло."""
             return [
                 index
-                for index in pattern.free(filled, event.token, 1.0, self._vocabulary)
-                if event.score < pattern.slots[index].min_score
+                for index in collector.free(filled, event.token, 1.0, self._vocabulary)
+                if event.score < collector.pattern.slots[index].min_score
             ]
 
         # нарушенная тишина: истёкшие окна закрыты выше, поэтому оставшиеся ещё идут
@@ -516,33 +548,33 @@ class Engine:
                 self._enter(Cursor(child, 1), Partial.begin(step), active, completed)
             else:
                 misses.append(Miss("score", Cursor(child, 1), None, None, start.min_score, event.score))
-        for (pattern, filled), partials in self._sets.items():
+        for (collector, filled), partials in self._sets.items():
+            pattern = collector.pattern
             for partial in partials:
                 deadline = partial.last_time + pattern.max_gap
                 if event.time > deadline:
                     # задержка у открытых шагов одна, и она истекла: совпадение снято
-                    fitting = pattern.free(filled, event.token, 1.0, self._vocabulary)
-                    reason = "late" if fitting else "expired"
+                    late = collector.free(filled, event.token, 1.0, self._vocabulary)
+                    reason = "late" if late else "expired"
                     misses.append(
-                        Miss(reason, (pattern, filled), partial, None, deadline, event.time)
+                        Miss(reason, collector.place(filled), partial, None, deadline, event.time)
                     )
                     continue
-                keep(sets.setdefault((pattern, filled), []), partial)  # копия ждёт другого шага
-                for index in pattern.free(filled, event.token, event.score, self._vocabulary):
-                    collect(pattern, filled | {index}, partial.extend(step))
-                for index in low_slots(pattern, filled):
+                keep(sets.setdefault((collector, filled), []), partial)  # копия ждёт другого шага
+                for index in collector.free(filled, event.token, event.score, self._vocabulary):
+                    collect(collector, filled | 1 << index, partial.extend(step))
+                for index in low_slots(collector, filled):
                     threshold = pattern.slots[index].min_score
-                    misses.append(
-                        Miss("score", (pattern, filled), partial, None, threshold, event.score)
-                    )
-        for pattern in self._unordered:
+                    place = collector.place(filled)
+                    misses.append(Miss("score", place, partial, None, threshold, event.score))
+        for collector in self._collectors:
             # начать набор может любой его шаг
-            for index in pattern.free(frozenset(), event.token, event.score, self._vocabulary):
-                collect(pattern, frozenset({index}), Partial.begin(step))
-            for index in low_slots(pattern, frozenset()):
-                threshold = pattern.slots[index].min_score
+            for index in collector.free(0, event.token, event.score, self._vocabulary):
+                collect(collector, 1 << index, Partial.begin(step))
+            for index in low_slots(collector, 0):
+                threshold = collector.pattern.slots[index].min_score
                 misses.append(
-                    Miss("score", (pattern, frozenset()), None, None, threshold, event.score)
+                    Miss("score", collector.place(0), None, None, threshold, event.score)
                 )
         # срабатывания выдаются после обхода: из совпадений сценария выбирается самое уверенное
         matches += self._finish(completed, event.time)
@@ -585,7 +617,7 @@ class Engine:
         if node.scenario is not None:
             completed.setdefault(node.scenario, []).append(partial)
         # ранний отсев; у вершины без продолжений `ahead` пуст, и совпадение в ней не остаётся
-        if any(partial.bound(length) >= threshold for length, threshold in node.ahead):
+        if node.ahead.reaches(partial.product):
             if node.offset < len(node.node.segment) or node.node.children:
                 keep(active.setdefault(node, []), partial)
             for edge in node.silences():
