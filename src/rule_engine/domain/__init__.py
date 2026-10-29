@@ -1,1 +1,1 @@
-"""Ядро: правила, граф сценариев, проход потока. Не знает ни об интерфейсах, ни о фреймворке."""
+"""Core: rules, the scenario graph and stream matching. Knows nothing of interfaces."""

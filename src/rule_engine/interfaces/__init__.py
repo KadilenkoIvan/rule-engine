@@ -1,1 +1,1 @@
-"""Интерфейсы: CLI и веб. Оба работают через `RuleEngineService` и друг о друге не знают."""
+"""Interfaces: CLI and web. Both work through `RuleEngineService` and do not know each other."""

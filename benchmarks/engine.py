@@ -1,10 +1,9 @@
-"""Замеры движка: время обработки события, построение, снимки, add_scenario, память.
+"""Engine benchmarks: event time, build, snapshots, add_scenario and memory.
 
-uv run python benchmarks/engine.py [нагрузка ...] [--memory]
+uv run python benchmarks/engine.py [workload ...] [--memory]
 
-Время — лучший из REPEATS прогонов по сумме времени событий; медиана и p99 — по событиям этого
-прогона. `--memory` — отдельный прогон под tracemalloc: память после построения, пик под
-нагрузкой и в конце. Снимок замеряется отдельно: его стоимость не входит во время событий.
+Time is the best of REPEATS runs by total event time; median and percentiles are of that run.
+Snapshots are timed apart from events. `--memory` is a separate run under tracemalloc.
 """
 
 import gc
@@ -24,6 +23,7 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 
 def rules(scenarios, vocabulary=None, **settings):
+    """Rules of a workload; the vocabulary defaults to the tokens of the patterns."""
     if vocabulary is None:
         tokens = set()
         for scenario in scenarios:
@@ -46,7 +46,7 @@ def rules(scenarios, vocabulary=None, **settings):
 # Нагрузка: (правила, операции). Операция — Event, float (advance) или ("add", dict).
 
 def chains(busy):
-    """1. Длинные сжатые цепочки: 40 сценариев по 40 шагов без общих префиксов."""
+    """1. Long compressed chains: 40 scenarios of 40 steps without common prefixes."""
     rng = random.Random(1)
     scenarios = [{"name": f"c{i}", "patterns": [[f"c{i}_{k}" for k in range(40)]],
                   "max_gap": 1e9} for i in range(40)]
@@ -66,7 +66,7 @@ def chains(busy):
 
 
 def wide():
-    """2. Широкий граф: 800 сценариев, много ожидающих, подходящие события редки."""
+    """2. Wide graph: 800 scenarios, many waiting matches, fitting events are rare."""
     rng = random.Random(2)
     vocab = [f"t{i}" for i in range(200)]
     scenarios = [{"name": f"w{i}", "patterns": [[rng.choice(vocab) for _ in range(rng.randint(3, 6))]],
@@ -80,7 +80,7 @@ def wide():
 
 
 def incomparable():
-    """3. Много несравнимых кандидатов в одном состоянии: score старта убывает."""
+    """3. Many incomparable candidates in one place: start scores decrease."""
     scenarios = [{"name": "s", "patterns": [["a", "b", "c"]], "max_gap": 1e9}]
     ops, now = [], 0.0
     for n in range(400):
@@ -94,7 +94,7 @@ def incomparable():
 
 
 def unordered():
-    """4. Шаблоны any с повторами и wildcard-шагами, разные пороги."""
+    """4. `any` patterns with repeats and wildcard steps, various thresholds."""
     rng = random.Random(4)
     vocab = [f"u{i}" for i in range(30)]
     scenarios = []
@@ -115,7 +115,7 @@ def unordered():
 
 
 def silences():
-    """5. Много окон тишины: before, точечные и wildcard-запреты."""
+    """5. Many silence windows: `before`, single and wildcard forbidden tokens."""
     rng = random.Random(5)
     vocab = [f"s{i}" for i in range(40)]
     scenarios = []
@@ -137,6 +137,7 @@ def silences():
 
 
 def scenario_key(item):
+    """Key of the scenario's pattern: scenarios with equal keys conflict."""
     pattern = item["patterns"][0]
     if item.get("order") == "any":
         return "any", json.dumps(sorted(pattern))
@@ -144,23 +145,13 @@ def scenario_key(item):
 
 
 def mixed():
-    """6. Смешанная нагрузка и динамические вставки с расщеплениями."""
+    """6. Mixed load and dynamic inserts with splits."""
     rng = random.Random(6)
     vocab = [f"m{i}" for i in range(60)]
-
-    def scenario(i):
-        if i % 5 == 0:
-            return {"name": f"x{i}", "order": "any",
-                    "patterns": [[rng.choice(vocab[:15]) for _ in range(3)]]}
-        pattern = [rng.choice(vocab[:8]) for _ in range(rng.randint(2, 8))]
-        if i % 7 == 0:
-            pattern.insert(rng.randrange(1, len(pattern)), {"absent": [rng.choice(vocab)], "for": 1.0})
-        return {"name": f"x{i}", "patterns": [pattern], "max_gap": 4.0}
-
     ops, now, seen, count = [], 0.0, set(), 0
     initial = []
     while len(initial) < 200:
-        item = scenario(count)
+        item = _mixed_scenario(rng, vocab, count)
         count += 1
         key = scenario_key(item)
         if key not in seen:
@@ -169,7 +160,7 @@ def mixed():
     for n in range(5000):
         now += rng.choice([0.1, 0.5])
         if n % 50 == 49:
-            item = scenario(count)
+            item = _mixed_scenario(rng, vocab, count)
             count += 1
             key = scenario_key(item)
             if key not in seen:
@@ -180,8 +171,19 @@ def mixed():
     return rules(initial, vocabulary=vocab), ops
 
 
+def _mixed_scenario(rng, vocab, i):
+    """Scenario number `i` of the mixed workload: every 5th is `any`, every 7th has a silence."""
+    if i % 5 == 0:
+        return {"name": f"x{i}", "order": "any",
+                "patterns": [[rng.choice(vocab[:15]) for _ in range(3)]]}
+    pattern = [rng.choice(vocab[:8]) for _ in range(rng.randint(2, 8))]
+    if i % 7 == 0:
+        pattern.insert(rng.randrange(1, len(pattern)), {"absent": [rng.choice(vocab)], "for": 1.0})
+    return {"name": f"x{i}", "patterns": [pattern], "max_gap": 4.0}
+
+
 def small():
-    """7. Примеры: smart_home.json и все потоки examples/*.txt подряд, сдвинутые по времени."""
+    """7. Examples: smart_home.json and all examples/*.txt streams in a row, shifted in time."""
     data = RuleSet.from_dict(json.loads((EXAMPLES / "smart_home.json").read_text()))
     ops, offset = [], 0.0
     for _ in range(20):
@@ -213,6 +215,11 @@ WORKLOADS = {
 
 
 def run(engine, ops, timing):
+    """Runs the operations; with `timing`, also times a snapshot every 500 operations.
+
+    Returns:
+        Times of events and advances, times of add_scenario, total snapshot time; all in ns.
+    """
     push_ns, add_ns = [], []
     snapshot_ns = 0
     clock = time.perf_counter_ns
@@ -237,47 +244,59 @@ def run(engine, ops, timing):
 
 
 def quantile(values, q):
+    """Quantile `q` of the values."""
     values = sorted(values)
     return values[min(len(values) - 1, int(q * len(values)))]
 
 
 def main():
+    """Runs the workloads named in the arguments, all by default."""
     names = [name for name in sys.argv[1:] if not name.startswith("--")] or list(WORKLOADS)
     memory = "--memory" in sys.argv
     for name in names:
         rule_set, ops = WORKLOADS[name]()
         if memory:
-            gc.collect()
-            tracemalloc.start()
-            base = tracemalloc.get_traced_memory()[0]
-            engine = Engine(rule_set)
-            built = tracemalloc.get_traced_memory()[0] - base
-            tracemalloc.reset_peak()
-            run(engine, ops, False)
-            current, peak = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
-            print(f"{name:18} память: после построения {built / 1024:8.0f} КиБ, "
-                  f"пик {(peak - base) / 1024:8.0f} КиБ, в конце {(current - base) / 1024:8.0f} КиБ, "
-                  f"активных {engine.active_count}", flush=True)
-            continue
-        best = None
-        for _ in range(REPEATS):
-            gc.collect()
-            start = time.perf_counter_ns()
-            engine = Engine(rule_set)
-            build = time.perf_counter_ns() - start
-            push_ns, add_ns, snapshot_ns = run(engine, ops, True)
-            total = sum(push_ns)
-            if best is None or total < best[0]:
-                best = (total, build, push_ns, add_ns, snapshot_ns, engine.active_count)
-        total, build, push_ns, add_ns, snapshot_ns, active = best
-        line = (f"{name:18} событие мкс: медиана {statistics.median(push_ns) / 1e3:8.1f} "
-                f"p95 {quantile(push_ns, 0.95) / 1e3:8.1f} p99 {quantile(push_ns, 0.99) / 1e3:8.1f} "
-                f"среднее {total / len(push_ns) / 1e3:8.1f} | построение {build / 1e6:6.1f} мс "
-                f"| снимки {snapshot_ns / 1e6:7.1f} мс | активных в конце {active}")
-        if add_ns:
-            line += f" | add_scenario мкс: медиана {statistics.median(add_ns) / 1e3:.0f} макс {max(add_ns) / 1e3:.0f}"
-        print(line, flush=True)
+            measure_memory(name, rule_set, ops)
+        else:
+            measure_time(name, rule_set, ops)
+
+
+def measure_memory(name, rule_set, ops):
+    """Prints memory after the build, the peak under load and at the end."""
+    gc.collect()
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    engine = Engine(rule_set)
+    built = tracemalloc.get_traced_memory()[0] - base
+    tracemalloc.reset_peak()
+    run(engine, ops, False)
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    print(f"{name:18} память: после построения {built / 1024:8.0f} КиБ, "
+          f"пик {(peak - base) / 1024:8.0f} КиБ, в конце {(current - base) / 1024:8.0f} КиБ, "
+          f"активных {engine.active_count}", flush=True)
+
+
+def measure_time(name, rule_set, ops):
+    """Prints event time quantiles, build and snapshot time of the best of REPEATS runs."""
+    best = None
+    for _ in range(REPEATS):
+        gc.collect()
+        start = time.perf_counter_ns()
+        engine = Engine(rule_set)
+        build = time.perf_counter_ns() - start
+        push_ns, add_ns, snapshot_ns = run(engine, ops, True)
+        total = sum(push_ns)
+        if best is None or total < best[0]:
+            best = (total, build, push_ns, add_ns, snapshot_ns, engine.active_count)
+    total, build, push_ns, add_ns, snapshot_ns, active = best
+    line = (f"{name:18} событие мкс: медиана {statistics.median(push_ns) / 1e3:8.1f} "
+            f"p95 {quantile(push_ns, 0.95) / 1e3:8.1f} p99 {quantile(push_ns, 0.99) / 1e3:8.1f} "
+            f"среднее {total / len(push_ns) / 1e3:8.1f} | построение {build / 1e6:6.1f} мс "
+            f"| снимки {snapshot_ns / 1e6:7.1f} мс | активных в конце {active}")
+    if add_ns:
+        line += f" | add_scenario мкс: медиана {statistics.median(add_ns) / 1e3:.0f} макс {max(add_ns) / 1e3:.0f}"
+    print(line, flush=True)
 
 
 if __name__ == "__main__":
