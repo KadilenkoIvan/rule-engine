@@ -11,7 +11,7 @@ import math
 from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import count, groupby, islice
 from typing import NamedTuple
 
@@ -464,13 +464,7 @@ class Engine:
             for token in step_tokens(step)
         } - self._vocabulary - WILDCARDS
         vocabulary = self._vocabulary | new_tokens if new_tokens else self._vocabulary
-        rules = RuleSet(
-            vocabulary,
-            (scenario,),
-            self._defaults.max_gap,
-            self._defaults.min_score,
-            self._defaults.min_confidence,
-        )
+        rules = replace(self._defaults, vocabulary=vocabulary, scenarios=(scenario,))
         if scenario.order == "sequence":
             changes = insert_scenario(self._starts, rules, scenario)
             for old, prefix, cut in changes.splits:

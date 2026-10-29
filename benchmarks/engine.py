@@ -37,7 +37,8 @@ def rules(scenarios, vocabulary=None, **settings):
                         tokens.add(step["token"])
         vocabulary = sorted(tokens - {"any", "any_vac"})
     return RuleSet.from_dict({
-        "max_gap": 3.0, "min_score": 0.3, "min_confidence": 0.3, **settings,
+        "self_correction": False, "max_gap": 3.0, "min_score": 0.3, "min_confidence": 0.3,
+        **settings,
         "vocabulary": vocabulary, "scenarios": scenarios,
     })
 

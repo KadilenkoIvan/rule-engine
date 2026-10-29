@@ -6,10 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # допустимые ключи JSON на каждом уровне: другой ключ — ошибка, чтобы опечатка не терялась молча
-RULES_KEYS = frozenset({"max_gap", "min_score", "min_confidence", "vocabulary", "scenarios"})
+RULES_KEYS = frozenset({
+    "self_correction", "max_gap", "min_score", "min_confidence", "hold", "corrections",
+    "negations", "negation_breaks", "vocabulary", "scenarios",
+})
 SCENARIO_KEYS = frozenset(
-    {"name", "patterns", "order", "cooldown", "max_gap", "min_score", "min_confidence"}
+    {"name", "patterns", "order", "cooldown", "max_gap", "min_score", "min_confidence", "hold"}
 )
+# списки фраз-маркеров в корне: ключ JSON → что делает фраза
+MARKERS = ("corrections", "negations", "negation_breaks")
 ORDERS = ("sequence", "any")  # шаги по порядку шаблона или в любом порядке
 STEP_KEYS = frozenset({"token", "max_gap", "min_score"})
 SILENCE_KEYS = frozenset({"absent", "for", "before", "min_score"})
@@ -51,6 +56,10 @@ class Scenario:
     max_gap: float | None  # секунды между шагами, у которых задержка не задана; None — из корня
     min_score: float | None  # порог шагов, у которых он не задан; None — из корня
     min_confidence: float | None  # порог общей уверенности; None — из корня
+    hold: float | None  # секунды задержки выдачи в режиме поправок; None — из корня
+
+
+Phrase = tuple[str, ...]  # маркер: токены, которые идут в потоке подряд
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,12 @@ class RuleSet:
     max_gap: float  # секунды между шагами, если задержку не задали ни шаг, ни сценарий
     min_score: float  # порог score токена, если его не задали ни шаг, ни сценарий
     min_confidence: float  # порог общей уверенности, если сценарий не задал свой
+    # режим поправок: False — остальные настройки ниже проверяются, но не действуют
+    self_correction: bool
+    hold: float  # секунды задержки выдачи, если сценарий не задал свою
+    corrections: tuple[Phrase, ...]  # «ой», «а нет»: снимают ждущие срабатывания
+    negations: tuple[Phrase, ...]  # «не»: подавляет следующую команду
+    negation_breaks: tuple[Phrase, ...]  # «а», «но»: закрывают отрицание
 
     def __post_init__(self) -> None:
         reserved = sorted(self.vocabulary & WILDCARDS)
@@ -74,6 +89,11 @@ class RuleSet:
             raise ValueError(f"min_score {self.min_score} должен быть в [0, 1]")
         if not unit_interval(self.min_confidence):
             raise ValueError(f"min_confidence {self.min_confidence} должен быть в [0, 1]")
+        if not isinstance(self.self_correction, bool):
+            raise ValueError(f"self_correction {self.self_correction!r} должен быть true или false")
+        if not non_negative_finite(self.hold):
+            raise ValueError(f"hold {self.hold} должен быть неотрицательным конечным числом")
+        check_markers(self)
         names: set[str] = set()
         for scenario in self.scenarios:
             if scenario.name in names:
@@ -92,6 +112,11 @@ class RuleSet:
                 raise ValueError(
                     f"сценарий {scenario.name!r}: min_confidence {scenario.min_confidence} должен "
                     "быть в [0, 1]"
+                )
+            if scenario.hold is not None and not non_negative_finite(scenario.hold):
+                raise ValueError(
+                    f"сценарий {scenario.name!r}: hold {scenario.hold} должен быть "
+                    "неотрицательным конечным числом"
                 )
             if scenario.order not in ORDERS:
                 raise ValueError(
@@ -185,6 +210,12 @@ class RuleSet:
             return scenario.min_confidence
         return self.min_confidence
 
+    def hold_of(self, scenario: Scenario) -> float:
+        """Задержка выдачи сценария: своя; если не задана — из корня."""
+        if scenario.hold is not None:
+            return scenario.hold
+        return self.hold
+
     @classmethod
     def from_dict(cls, data: dict) -> "RuleSet":
         """Шаблон — список шагов, а не строка через пробел: в токене бывают пробелы.
@@ -192,9 +223,10 @@ class RuleSet:
         Шаг — строка с токеном, объект `{"token": ..., "max_gap": ..., "min_score": ...}` или
         шаг-тишина `{"absent": [...], "for": ..., "before": ..., "min_score": ...}`. Токен `any` —
         любой токен, `any_vac` — любой токен словаря; они годятся везде, где токен.
-        `max_gap` и `min_score` у шага и у сценария необязательны, `min_confidence`, `cooldown` и
-        `order` сценария — тоже; `cooldown` по умолчанию 0, `order` — "sequence". Неизвестный ключ
-        на любом уровне — ошибка.
+        `max_gap` и `min_score` у шага и у сценария необязательны, `min_confidence`, `cooldown`,
+        `hold` и `order` сценария — тоже; `cooldown` по умолчанию 0, `order` — "sequence".
+        `self_correction` в корне обязателен; `hold` корня по умолчанию 0, списки маркеров —
+        пустые. Неизвестный ключ на любом уровне — ошибка.
         """
         check_keys(data, RULES_KEYS, "корень правил")
         scenarios = tuple(parse_scenario(item) for item in data["scenarios"])
@@ -204,6 +236,9 @@ class RuleSet:
             float(data["max_gap"]),
             float(data["min_score"]),
             float(data["min_confidence"]),
+            data["self_correction"],
+            float(data.get("hold", 0.0)),
+            *(parse_phrases(data.get(key, []), key) for key in MARKERS),
         )
 
 
@@ -213,6 +248,29 @@ def positive_finite(value: float) -> bool:
 
 def unit_interval(value: float) -> bool:
     return 0.0 <= value <= 1.0
+
+
+def non_negative_finite(value: float) -> bool:
+    return math.isfinite(value) and value >= 0
+
+
+def check_markers(rules: RuleSet) -> None:
+    """Фразы-маркеры: непустые, из токенов словаря; одна фраза — в одном списке и один раз.
+
+    Фраза может начинать фразу другого списка: «а» закрывает отрицание, «а нет» — поправка.
+    """
+    seen: dict[Phrase, str] = {}
+    for key in MARKERS:
+        for phrase in getattr(rules, key):
+            if not phrase:
+                raise ValueError(f"{key}: пустая фраза")
+            unknown = [token for token in phrase if token not in rules.vocabulary]
+            if unknown:
+                raise ValueError(f"{key}: токенов {unknown} фразы {list(phrase)} нет в словаре")
+            if phrase in seen:
+                where = "дважды" if seen[phrase] == key else f"и в {seen[phrase]}"
+                raise ValueError(f"{key}: фраза {list(phrase)} задана {where}")
+            seen[phrase] = key
 
 
 def step_tokens(step: PatternStep | SilenceStep) -> tuple[str, ...]:
@@ -305,7 +363,18 @@ def parse_scenario(item: dict) -> Scenario:
         float(item["max_gap"]) if "max_gap" in item else None,
         float(item["min_score"]) if "min_score" in item else None,
         float(item["min_confidence"]) if "min_confidence" in item else None,
+        float(item["hold"]) if "hold" in item else None,
     )
+
+
+def parse_phrases(items: list, key: str) -> tuple[Phrase, ...]:
+    """Список фраз-маркеров: фраза — список токенов, а не строка, как и шаблон."""
+    if not isinstance(items, list) or not all(
+        isinstance(phrase, list) and all(isinstance(token, str) for token in phrase)
+        for phrase in items
+    ):
+        raise ValueError(f"{key} должен быть списком фраз, фраза — списком токенов")
+    return tuple(tuple(phrase) for phrase in items)
 
 
 def parse_step(scenario: str, item: str | dict) -> PatternStep | SilenceStep:
