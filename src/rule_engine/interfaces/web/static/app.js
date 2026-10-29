@@ -1,4 +1,8 @@
-// HTML собирает сервер. Здесь только запросы, вставка ответа и переключение кадров прогона.
+// HTML собирает сервер. Здесь только запросы, вставка ответа и переключение кадров прогона;
+// плеер кадров — в player.js, живой режим — в live.js.
+
+import { setupLive } from "./live.js";
+import { setupPlayer } from "./player.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -38,6 +42,17 @@ let addingScenario = false;
 let graphQueue = Promise.resolve();
 let graphPending = 0;
 
+// живая сессия идёт по правилам, которые сервер уже проверил; запись сессии прогоняется сразу
+const live = setupLive({
+  rules: () => (syncedRules !== null && syncedRules === $("rules").value ? syncedRules : null),
+  toStream: (text) => {
+    $("stream").value = text;
+    $("stream-file").value = "";
+    showTab("trace");
+    runTrace();
+  },
+});
+
 function queueGraph(action) {
   graphPending += 1;
   $("graph").classList.add("pending");
@@ -71,7 +86,10 @@ async function refreshGraph() {
       });
       if (result === null) return;
       syncedRules = result.ok ? source : null;
-      if (source === $("rules").value) $("graph").innerHTML = result.html;
+      if (source === $("rules").value) {
+        $("graph").innerHTML = result.html;
+        live.rulesChanged(syncedRules);
+      }
       updateScenarioButton();
     });
   } catch (error) {
@@ -118,6 +136,7 @@ $("scenario-form").addEventListener("submit", async (event) => {
       syncedRules = result.rules;
       $("rules-file").value = "";
       $("graph").innerHTML = result.graph;
+      live.rulesChanged(result.rules);
       if (traced) runTrace();
       showTab("graph");
       $("scenario-form").reset();
@@ -135,35 +154,6 @@ $("scenario-form").addEventListener("submit", async (event) => {
     updateScenarioButton();
   }
 });
-
-// кадры прогона уже на странице: ползунок только показывает нужный
-function setupPlayer(root, start) {
-  const frames = root.querySelectorAll(".frame");
-  const slider = root.querySelector(".player input[type=range]");
-  root.step = null;
-  root.current = null;
-  if (!slider) return;
-  const position = root.querySelector(".player .position");
-  const show = (index) => {
-    const current = Math.max(0, Math.min(frames.length - 1, index));
-    slider.value = current;
-    frames.forEach((frame, i) => { frame.hidden = i !== current; });
-    position.textContent = `кадр ${current + 1} из ${frames.length}`;
-    for (const item of root.querySelectorAll("[data-frame]")) {
-      item.classList.toggle("current", Number(item.dataset.frame) === current);
-    }
-  };
-  slider.addEventListener("input", () => show(Number(slider.value)));
-  for (const button of root.querySelectorAll("[data-step]")) {
-    button.addEventListener("click", () => show(Number(slider.value) + Number(button.dataset.step)));
-  }
-  for (const item of root.querySelectorAll("[data-frame]")) {
-    item.addEventListener("click", () => show(Number(item.dataset.frame)));
-  }
-  root.step = (delta) => show(Number(slider.value) + delta);
-  root.current = () => Number(slider.value);
-  show(start);
-}
 
 let traced = false; // прогон уже показан: дальше он пересчитывается при каждой правке
 
@@ -234,10 +224,10 @@ for (const tab of document.querySelectorAll("[data-tab]")) {
   tab.addEventListener("click", () => showTab(tab.dataset.tab));
 }
 
-// стрелки листают кадры, когда открыт прогон и курсор не в текстовом поле
+// стрелки листают кадры, когда открыт прогон или живой режим и курсор не в текстовом поле
 document.addEventListener("keydown", (event) => {
-  const trace = $("trace");
-  if (trace.hidden || !trace.step || event.target.closest("textarea, input, select")) return;
-  if (event.key === "ArrowLeft") trace.step(-1);
-  if (event.key === "ArrowRight") trace.step(1);
+  const panel = [$("trace"), $("live")].find((item) => !item.hidden && item.step);
+  if (!panel || event.target.closest("textarea, input, select")) return;
+  if (event.key === "ArrowLeft") panel.step(-1);
+  if (event.key === "ArrowRight") panel.step(1);
 });

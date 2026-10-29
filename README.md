@@ -9,7 +9,7 @@
 ### Установка
 
 ```bash
-uv sync   # движок, командная строка и веб-интерфейс (FastAPI, uvicorn, Jinja2)
+uv sync   # движок, командная строка и веб-интерфейс (FastAPI, uvicorn, Jinja2, websockets)
 ```
 
 ### Выбор интерфейса
@@ -48,7 +48,7 @@ uv run rule-engine web examples --host 0.0.0.0 --port 9000
 Ctrl+C.
 
 Слева два поля: «Правила» и «Поток». Текст в них можно править или выбрать
-пример из списка. Справа две вкладки.
+пример из списка. Справа три вкладки.
 
 - **Граф.** Перерисовывается при каждой правке правил. Если в правилах ошибка,
   вместо графа показан её текст. Под деревом — шаблоны `any` («В любом
@@ -61,6 +61,9 @@ Ctrl+C.
   закрытыми шагами и таблица частичных совпадений: где стоит, какие шаги
   собраны, уверенность, до какого момента ждёт. Если строка потока неверна,
   видны кадры до неё и текст ошибки.
+- **Живой режим.** Токены вводятся по одному «сейчас», и после каждого токена и
+  каждого конца окна тишины приходит новый кадр — такой же, как в прогоне. Подробнее —
+  ниже, в разделе «Живой режим в браузере».
 
 После первого прогона он пересчитывается сам при любой правке или смене правил и
 потока и остаётся на том же кадре. Пока ответ не пришёл, панель полупрозрачная.
@@ -103,6 +106,39 @@ Ctrl+C.
 У каждой вкладки своя сессия редактирования на сервере. Она хранится в памяти и истекает
 после часа бездействия; изменения не записываются в файлы примеров. После изменения
 правил показанный прогон пересчитывается автоматически, сохраняя текущий кадр.
+
+#### Живой режим в браузере
+
+«Начать сессию» запускает сессию по правилам слева: сервер заводит на неё свой
+`LiveEngine` со своими часами. Время событий ставит сервер — секунды от начала сессии, —
+поэтому задержки считаются по-настоящему: на «выключи свет» по умолчанию 3 с.
+
+- Токен вводится в поле (подсказки — из словаря, Enter отправляет) или кнопкой токена
+  словаря. Уверенность одна на все токены — ползунок рядом. Токен вне словаря уходит как
+  посторонний. Токен с пробелами по краям, переводом строки или с `#` в начале — ошибка:
+  его не записать строкой потока.
+- Окна тишины закрывает таймер сервера: через 3 с после `<дверь>` без громкого звука
+  приходит кадр ⏱ с «хозяином пришёл», даже если больше ничего не ввели. Время такого кадра
+  — когда таймер проснулся: на миллисекунды позже конца окна.
+- В режиме поправок (`"self_correction": true`, например
+  [examples/corrections.json](examples/corrections.json)) сработавший сценарий сначала
+  стоит в таблице «Ждёт выдачи», а выдаёт его тот же таймер — кадром ⏱, когда срок `hold`
+  прошёл. «ой», отправленное до срока, снимает ждущее: «включи свет в ванной, ой, в
+  спальне» выдаёт только спальню.
+- Кадры копятся в плеере. Пока открыт последний кадр, плеер показывает каждый новый; если
+  уйти назад кнопками, ползунком, стрелками или кликом по срабатыванию, он остаётся на
+  месте, а «к последнему» возвращает слежение.
+- Смена правил — правка JSON или «Добавить сценарий» — начинает сессию заново: прежние
+  кадры удаляются. Если в правилах ошибка, сессия стоит, пока её не исправят.
+  «Остановить» оставляет кадры: их можно листать.
+- «В поток» записывает сессию в поле «Поток» — событие строкой «токен уверенность время»,
+  ход таймера меткой времени, числа точно — и сразу прогоняет её: прогон даёт те же
+  срабатывания. Пример такой записи — [examples/live.txt](examples/live.txt).
+
+Браузер и сервер говорят по WebSocket `/live`, на соединение — одна сессия. Первое
+сообщение — `{"rules": "…"}`, дальше `{"token": "…", "score": 0.9}`. Сервер отвечает
+`start` (кнопки словаря и плеер с графом), `frame` (HTML кадра, строки ленты срабатываний
+и строка потока) и `error` (неверное сообщение; сессия при этом не меняется).
 
 Обозначения на графе:
 
@@ -177,7 +213,7 @@ uv run python examples/dynamic.py
 
 `LiveEngine` — движок с часами для событий «сейчас». Время события он ставит сам, а окна
 тишины закрывает таймер-поток: «хозяин пришёл» срабатывает через 3 с после двери, даже если
-больше ничего не пришло.
+больше ничего не пришло. Веб использует его в живом режиме через `RuleEngineService.live`.
 
 ```python
 from pathlib import Path
@@ -803,9 +839,9 @@ live.close()
 и громко сказанное «закрой дверь» не станет взломом.
 
 Потоки лежат в [examples/](examples/) (`stream.txt`, `pause.txt`, `alarm.txt`,
-`repeats.txt`, `gaps.txt`, `scores.txt`, `confidence.txt`, `order.txt`, `silence.txt`;
-`nanny.txt` — для правил `nanny.json`; `hold.txt`, `corrections.txt`, `negations.txt` — для
-правил `corrections.json`):
+`repeats.txt`, `gaps.txt`, `scores.txt`, `confidence.txt`, `order.txt`, `silence.txt`,
+`live.txt` — запись живой сессии; `nanny.txt` — для правил `nanny.json`; `hold.txt`,
+`corrections.txt`, `negations.txt` — для правил `corrections.json`):
 одна строка на событие, в формате `токен уверенность время`. Токеном считается всё до двух
 последних чисел, поэтому в нём бывают пробелы: `<громкий звук> 0.62 12.4`.
 Пустые строки и строки, начинающиеся с `#`, пропускаются. Уверенность — число
@@ -940,9 +976,9 @@ CLI и frontend не зависят от физического сжатия: п
 ```
 main.py — выбирает интерфейс: rule-engine cli … | rule-engine web …
    ├─> interfaces/cli ─┐   argparse, текст
-   └─> interfaces/web ─┤   контроллер, HTML и SVG; server.py — FastAPI
+   └─> interfaces/web ─┤   контроллер, HTML и SVG; server.py — FastAPI и WebSocket
                        ▼
-                application/   RuleEngineService, view-модели, формат потока
+                application/   RuleEngineService, LiveSession, view-модели, формат потока
                        ▼
                    domain/     правила, граф, проход потока
 ```
@@ -958,14 +994,15 @@ CLI и веб взаимозаменяемы: оба работают тольк
 - [domain/engine.py](src/rule_engine/domain/engine.py): проход потока по графу, по наборам `any` и по окнам тишины через индексы токенов, фронты и очередь сроков, `advance` и `next_deadline`, снимок совпадений, отказы; режим поправок — ждущие выдачи, поправки, отрицания, отложенные маркеры;
 - [domain/timer_wheel.py](src/rule_engine/domain/timer_wheel.py): иерархическое колесо таймеров для сроков окон тишины;
 - [domain/live.py](src/rule_engine/domain/live.py): `LiveEngine` — живой режим с часами и таймер-потоком;
-- [application/service.py](src/rule_engine/application/service.py): сценарии использования — граф и прогон;
+- [application/service.py](src/rule_engine/application/service.py): сценарии использования — граф, прогон и живая сессия (`LiveSession`: кадры слушателю строго по порядку);
+- [application/ports.py](src/rule_engine/application/ports.py): порт `LiveListener` — куда живая сессия отдаёт кадры;
 - [application/views.py](src/rule_engine/application/views.py): view-модели — граф, кадры, срабатывания;
 - [application/tokens.py](src/rule_engine/application/tokens.py): подписи `any` и `any_vac` и правило «токен подходит к шагу» для интерфейсов;
-- [application/stream.py](src/rule_engine/application/stream.py): формат потока и метки времени;
+- [application/stream.py](src/rule_engine/application/stream.py): формат потока и метки времени, кадр строкой потока для записи живой сессии;
 - [interfaces/base.py](src/rule_engine/interfaces/base.py): контракт `Interface`;
 - [interfaces/cli/](src/rule_engine/interfaces/cli): командная строка и печать графа;
-- [interfaces/web/](src/rule_engine/interfaces/web): контроллер, презентер, раскладка SVG, шаблоны, статика;
-- [interfaces/web/server.py](src/rule_engine/interfaces/web/server.py): маршруты FastAPI.
+- [interfaces/web/](src/rule_engine/interfaces/web): контроллер (в том числе `LiveChannel` — соединение живого режима), презентер, раскладка SVG, шаблоны, статика: `app.js`, `player.js` (плеер кадров), `live.js` (живой режим) — ES-модули без сборки и библиотек;
+- [interfaces/web/server.py](src/rule_engine/interfaces/web/server.py): маршруты FastAPI и WebSocket `/live`: кадры из таймер-потока передаются в цикл событий через `call_soon_threadsafe`.
 
 ## Все примеры
 
@@ -980,11 +1017,12 @@ uv run rule-engine cli run examples/smart_home.json examples/scores.txt      # �
 uv run rule-engine cli run examples/smart_home.json examples/confidence.txt  # общая уверенность
 uv run rule-engine cli run examples/smart_home.json examples/order.txt       # любой порядок
 uv run rule-engine cli run examples/smart_home.json examples/silence.txt     # тишина и метки времени
+uv run rule-engine cli run examples/smart_home.json examples/live.txt        # запись живой сессии
 uv run rule-engine cli run examples/nanny.json examples/nanny.txt            # радио-няня: any, any_vac
 uv run rule-engine cli run examples/corrections.json examples/hold.txt        # отложенная выдача
 uv run rule-engine cli run examples/corrections.json examples/corrections.txt # поправки «ой»
 uv run rule-engine cli run examples/corrections.json examples/negations.txt   # отрицания «не»
-uv run rule-engine web examples                                              # всё то же в браузере
+uv run rule-engine web examples                                              # всё то же в браузере и живой режим
 uv run pytest tests/test_timer_wheel.py                                      # колесо таймеров
 uv run pytest                                                               # все тесты
 uv run python benchmarks/engine.py                                           # замеры

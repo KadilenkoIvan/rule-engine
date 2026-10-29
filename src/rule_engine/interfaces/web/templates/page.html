@@ -73,6 +73,7 @@
       <nav class="tabs">
         <button type="button" data-tab="graph" class="on">Граф</button>
         <button type="button" data-tab="trace">Прогон</button>
+        <button type="button" data-tab="live">Живой режим</button>
       </nav>
       <div id="graph" class="panel">
         {% if graph is not none %}{% include "graph.html" %}{% else %}<div class="error"><strong>Ошибка.</strong> {{ error }}</div>{% endif %}
@@ -80,8 +81,24 @@
       <div id="trace" class="panel" hidden>
         <p class="muted">Нажмите «Прогнать поток»: здесь появятся кадры — по одному на событие и на конец окна тишины.</p>
       </div>
+      <div id="live" class="panel" hidden>
+        <div class="live-bar">
+          <button type="button" id="live-toggle" class="primary">Начать сессию</button>
+          <span id="live-clock" class="live-clock" hidden></span>
+          <span id="live-status" class="muted" role="status">Токены уходят «сейчас»: время ставит сервер, окна тишины закрывает его таймер. Сессия идёт по правилам слева.</span>
+          <button type="button" id="live-export" disabled title="Записать сессию в поле «Поток» и прогнать её">В поток</button>
+        </div>
+        <form id="live-form" class="live-form">
+          <input id="live-token" list="live-vocabulary" required autocomplete="off" spellcheck="false" placeholder="токен, Enter — отправить" aria-label="Токен" disabled>
+          <label class="live-score">уверенность <input id="live-score" type="range" min="0" max="1" step="0.01" value="0.9"> <output id="live-score-value" for="live-score">0.90</output></label>
+          <button type="submit" id="live-send" disabled>Отправить</button>
+        </form>
+        <div id="live-tokens" class="live-tokens"></div>
+        <p id="live-error" class="error" role="alert" hidden></p>
+        <div id="live-view"></div>
+      </div>
     </section>
   </main>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

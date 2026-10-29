@@ -1,0 +1,41 @@
+{# Живой режим: кнопки токенов словаря, плеер сессии и строки ленты срабатываний. #}
+{% import "macros.html" as m %}
+
+{% macro tokens(graph) %}
+<datalist id="live-vocabulary">
+  {% for token in graph.vocabulary %}<option value="{{ token }}">{% endfor %}
+</datalist>
+{% for token in graph.vocabulary %}<button type="button" data-token="{{ token }}">{{ token }}</button>{% endfor %}
+{% endmacro %}
+
+{# кадры приходят по одному и показываются в .frames; до первого — граф без совпадений #}
+{% macro view(graph, lay) %}
+<div class="player">
+  <div class="controls">
+    <button type="button" data-step="-1" title="Предыдущий кадр (←)">◀</button>
+    <input type="range" min="0" max="0" value="0" aria-label="Кадр" disabled>
+    <button type="button" data-step="1" title="Следующий кадр (→)">▶</button>
+    <span class="position muted">кадров пока нет</span>
+    <button type="button" class="follow" hidden title="Показывать каждый новый кадр">к последнему</button>
+  </div>
+  <div class="columns">
+    <div class="frames">
+      <section class="frame">
+        <h3><span class="muted">сессия начата: отправьте токен</span></h3>
+        <div class="canvas">{{ m.svg(lay, EMPTY) }}</div>
+        {{ m.sets(graph, EMPTY, none) }}
+      </section>
+    </div>
+    <aside class="log">
+      <h4>Все срабатывания</h4>
+      <ol></ol>
+    </aside>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro log(item, index) %}
+{% for fired in item.matches %}
+<li data-frame="{{ index }}" title="Перейти к кадру">{{ m.match(fired) }}</li>
+{% endfor %}
+{% endmacro %}
