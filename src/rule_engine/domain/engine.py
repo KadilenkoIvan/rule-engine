@@ -165,6 +165,17 @@ class Held(NamedTuple):
     until: float  # секунды: выдаётся, когда время станет больше
 
 
+class Negation:
+    """Открытое отрицание: подавит первое завершённое совпадение с шагом после него."""
+
+    __slots__ = ("position", "time", "deadline")
+
+    def __init__(self, position: int, time: float, deadline: float) -> None:
+        self.position = position  # последний токен фразы отрицания
+        self.time = time
+        self.deadline = deadline  # закрывается, когда время станет больше
+
+
 class Hold:
     """Ждущее срабатывание: срок продлевают новые шаги совпадений с тем же первым шагом."""
 
@@ -196,6 +207,9 @@ class Miss(NamedTuple):
     - `"corrected"` (режим поправок): поправка в `got` сняла ждущее срабатывание `scenario`,
       которое ждало выдачи до `need`, или частичное совпадение в `place`, в которое входит
       последний токен снятого срабатывания (тогда `need` = `got`).
+    - `"negated"` (режим поправок): отрицание, открытое в `need`, подавило срабатывание
+      `scenario` в `got`, или снято частичное совпадение в `place`, в которое входит последний
+      токен подавленного (тогда `need` = `got`).
 
     `partial` — совпадение, которое не продвинулось; `None` — новое совпадение не началось.
     У отказов сценария есть `scenario`, а `place` — `None`.
@@ -477,7 +491,13 @@ class Engine:
     - Поправка снимает все ждущие срабатывания. Снятое освобождает токены и cooldown, как будто
       его не было. Вместе с ним снимаются частичные совпадения и окна тишины, в которые входит
       его последний токен, а копии его префикса отсчитывают задержку от поправки. Окна тишины
-      копий префикса не сдвигаются: окно мерит тишину, а не задержку.
+      копий префикса не сдвигаются: окно мерит тишину, а не задержку. Поправка закрывает и
+      открытое отрицание.
+    - Отрицание открывается фразой из `negations` и подавляет первое завершённое совпадение с
+      шагом после фразы: срабатывание этого момента не выдаётся и не занимает токены и cooldown,
+      а дальше — как при снятии поправкой. Потом отрицание закрывается. Закрывают его и фраза из
+      `negation_breaks`, и срок: `max_gap` корня от фразы, а затем от каждого нового шага любого
+      совпадения. Фраза отрицания при открытом отрицании только продлевает срок.
     """
 
     def __init__(self, rules: RuleSet) -> None:
@@ -501,6 +521,7 @@ class Engine:
         self._lengths = sorted({len(phrase) for phrase in self._phrases})
         # последние события: фраза ищется сравнением хвоста потока, её токены идут подряд
         self._said: deque[Step] = deque(maxlen=max(self._lengths, default=1))
+        self._negation: Negation | None = None
         # первые позиции совпадений, для которых событие стало шагом; None — вне режима поправок
         self._stepped: set[int] | None = None
         self._vocabulary = rules.vocabulary
@@ -744,11 +765,23 @@ class Engine:
             for hold in self._held:
                 if hold.partial.first_position in stepped:
                     hold.deadline = max(hold.deadline, event.time + hold.hold)
+        negation = self._negation
+        if negation is not None and stepped:
+            negation.deadline = max(negation.deadline, event.time + self._defaults.max_gap)
         if self._phrases:
             self._said.append(step)
             heard = self._heard()
             if "correction" in heard:
                 self._cancel(self._held, event.time, "corrected")
+                self._negation = None
+            if "break" in heard:
+                self._negation = None
+            if "negation" in heard:
+                deadline = event.time + self._defaults.max_gap
+                if self._negation is None:
+                    self._negation = Negation(step.position, event.time, deadline)
+                else:
+                    self._negation.deadline = max(self._negation.deadline, deadline)
 
         self._recent.append(step)
         while self._recent and self._recent[0].event.time < event.time - self._lookback:
@@ -1103,6 +1136,7 @@ class Engine:
         for deadline, timers in groupby(fired, key=lambda timer: timer.deadline):
             if self._held:
                 matches += self._release(lambda due: due <= deadline)
+            self._expire_negation(deadline)
             completed: dict[str, list[Partial]] = {}
             for timer in timers:
                 self._unlist(timer)
@@ -1112,7 +1146,12 @@ class Engine:
             matches += self._finish(completed, deadline)
         if self._held:
             matches += self._release(lambda due: due < now)
+        self._expire_negation(now)
         return matches
+
+    def _expire_negation(self, now: float) -> None:
+        if self._negation is not None and now > self._negation.deadline:
+            self._negation = None
 
     def _release(self, due: Callable[[float], bool]) -> list[Match]:
         """Выдаёт ждущие срабатывания, срок которых прошёл (`due`): по срокам, один срок — один
@@ -1180,14 +1219,20 @@ class Engine:
     def _finish(self, completed: dict[str, list[Partial]], time: float) -> list[Match]:
         """Срабатывания одного момента: от начавшегося раньше, при равном начале — по объявлению."""
         matches = []
+        suppressed: list[Partial] = []  # подавленные отрицанием: все срабатывания момента
         for scenario, partials in completed.items():
-            match = self._fire(scenario, partials, time)
+            match = self._fire(scenario, partials, time, suppressed)
             if match is not None:
                 matches.append(match)
+        if suppressed:
+            self._negation = None
+            self._withdraw(suppressed, time, "negated")
         matches.sort(key=lambda match: (match.steps[0].position, self._declared[match.scenario]))
         return matches
 
-    def _fire(self, scenario: str, partials: list[Partial], time: float) -> Match | None:
+    def _fire(
+        self, scenario: str, partials: list[Partial], time: float, suppressed: list[Partial]
+    ) -> Match | None:
         taken = self._taken.setdefault(scenario, set())
         eligible = [
             partial
@@ -1219,10 +1264,15 @@ class Engine:
             until = fired_at + self._cooldowns[scenario]
             self._misses.append(Miss("cooldown", None, best, scenario, until, time))
             return None
+        hold = self._holds[scenario]
+        negation = self._negation
+        if hold > 0 and negation is not None and best.tail.step.position > negation.position:
+            self._misses.append(Miss("negated", None, best, scenario, negation.time, time))
+            suppressed.append(best)
+            return None
         taken.update(step.position for step in best.backwards())
         self._taken_count += best.count  # позиции новые: проверено выше
         self._fired_at[scenario] = time
-        hold = self._holds[scenario]
         if hold > 0:
             self._held.append(Hold(scenario, best, time, hold))
             self._active_count += 1

@@ -126,3 +126,47 @@ def test_marker_needs_consecutive_tokens_with_enough_score(make_rules):
                                ("нет", 0.9, 0.6), ("ой", 0.3, 0.8)]:
         engine.push(Event(token, score, time))
     assert names(engine.advance(5.0)) == ["pair"]
+
+
+def feed(engine, tokens, start=0.0, pause=0.4):
+    """Токены с шагом `pause`; возвращает время последнего."""
+    for index, token in enumerate(tokens):
+        engine.push(Event(token, 0.9, start + index * pause))
+    return start + (len(tokens) - 1) * pause
+
+
+def test_negation_suppresses_every_match_of_first_moment(make_rules):
+    engine = Engine(corrected(make_rules, [
+        {"name": "abc", "patterns": [["a", "b", "c"]]},
+        {"name": "bc", "patterns": [["b", "c"]]},
+        {"name": "de", "patterns": [["d", "e"]]},
+    ]))
+    feed(engine, ["не", "a", "b", "c"])
+    assert sorted(miss.scenario for miss in engine.misses if miss.reason == "negated") == ["abc", "bc"]
+    end = feed(engine, ["d", "e"], start=2.0)  # отрицание закрылось на «c»
+    assert names(engine.advance(end + 2.0)) == ["de"]
+
+
+@pytest.mark.parametrize("closer, expected", [
+    (["но"], ["ab"]),  # разрыв
+    (["ой"], ["ab"]),  # поправка закрывает и отрицание
+    ([], []),  # без разрыва «ab» подавлено
+])
+def test_negation_is_closed_by_break_or_correction(make_rules, closer, expected):
+    engine = Engine(corrected(make_rules, [{"name": "ab", "patterns": [["a", "b"]]}]))
+    end = feed(engine, ["не", *closer, "a", "b"])
+    assert names(engine.advance(end + 2.0)) == expected
+
+
+def test_negation_expires_and_ignores_hold_zero(make_rules):
+    engine = Engine(corrected(make_rules, [
+        {"name": "ab", "patterns": [["a", "b"]]},
+        {"name": "alarm", "hold": 0.0, "patterns": [["s"]]},
+    ]))
+    engine.push(Event("не", 0.9, 0.0))
+    assert names(engine.push(Event("s", 0.9, 1.0))) == ["alarm"]  # не подавлен и не закрыл
+    feed(engine, ["a", "b"], start=1.5)  # шаг «s» продлил срок до 4.0
+    assert [miss.scenario for miss in engine.misses if miss.reason == "negated"] == ["ab"]
+    engine.push(Event("не", 0.9, 10.0))
+    end = feed(engine, ["a", "b"], start=13.5)  # после 13.0 отрицание закрыто сроком
+    assert names(engine.advance(end + 2.0)) == ["ab"]
