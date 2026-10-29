@@ -75,6 +75,7 @@ class HeldView(NamedTuple):
     steps: tuple[EventView, ...]
     confidence: float
     until: float  # выдаётся, когда время станет больше
+    frozen: bool  # ждёт решения маркера, токен которого стоит шагом живого совпадения
 
 
 class WaitingView(NamedTuple):

@@ -19,7 +19,7 @@ def corrected(make_rules, scenarios, **settings):
             tokens.update(step if isinstance(step, str) else step["token"] for step in pattern)
     return make_rules(
         scenarios,
-        vocabulary=sorted(tokens),
+        vocabulary=sorted(tokens - {"any", "any_vac"}),
         **{"self_correction": True, "hold": 1.0, **MARKERS, **settings},
     )
 
@@ -170,3 +170,43 @@ def test_negation_expires_and_ignores_hold_zero(make_rules):
     engine.push(Event("не", 0.9, 10.0))
     end = feed(engine, ["a", "b"], start=13.5)  # после 13.0 отрицание закрыто сроком
     assert names(engine.advance(end + 2.0)) == ["ab"]
+
+
+def test_negation_inside_pattern_waits_for_its_match(make_rules):
+    scenarios = [
+        {"name": "ab", "patterns": [["a", "b"]]},
+        {"name": "quiet", "patterns": [["не", "q"]]},
+    ]
+    engine = Engine(corrected(make_rules, scenarios))
+    feed(engine, ["не", "q", "a", "b"])  # «не» стало шагом «quiet»: отрицания не было
+    assert names(engine.advance(5.0)) == ["quiet", "ab"]
+
+    engine = Engine(corrected(make_rules, scenarios))
+    feed(engine, ["не", "a", "b"])
+    [held] = engine.held
+    assert held.frozen  # ждёт, чем кончится «не …»
+    assert engine.next_deadline() == 3.0  # тогда «не …» снимется по сроку
+    assert engine.advance(3.0) == [] and engine.held[0].frozen
+    engine.advance(3.1)  # «не …» умерло: отрицание применено
+    assert engine.held == []
+    assert [miss.scenario for miss in engine.misses if miss.reason == "negated"] == ["ab"]
+
+
+@pytest.mark.parametrize("after, expected", [(["больно"], ["ab", "hurt"]), ([], [])])
+def test_correction_inside_pattern_is_cancelled_or_applied(make_rules, after, expected):
+    engine = Engine(corrected(make_rules, [
+        {"name": "ab", "patterns": [["a", "b"]]},
+        {"name": "hurt", "patterns": [["ой", "больно"]]},
+    ]))
+    feed(engine, ["a", "b", "ой", *after])
+    assert names(engine.advance(10.0)) == expected
+
+
+def test_wildcard_step_does_not_intercept_marker(make_rules):
+    engine = Engine(corrected(make_rules, [
+        {"name": "ab", "patterns": [["a", "b"]]},
+        {"name": "any z", "patterns": [["any", "z"]]},
+        {"name": "ой z", "patterns": [[{"token": "ой", "min_score": 0.95}, "z"]]},
+    ]))
+    feed(engine, ["a", "b", "ой"])  # «ой» 0.9 не начало «ой z», а шаг «any» маркер не держит
+    assert engine.held == []

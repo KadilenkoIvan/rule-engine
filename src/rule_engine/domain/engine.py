@@ -12,7 +12,7 @@ from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
-from itertools import count, groupby, islice, takewhile
+from itertools import chain, count, groupby, islice, takewhile
 from typing import NamedTuple
 
 from rule_engine.domain.graph import (
@@ -27,6 +27,7 @@ from rule_engine.domain.graph import (
 )
 from rule_engine.domain.rules import (
     WILDCARDS,
+    PatternStep,
     Phrase,
     RuleSet,
     Scenario,
@@ -163,23 +164,43 @@ class Held(NamedTuple):
     scenario: str
     partial: Partial
     until: float  # секунды: выдаётся, когда время станет больше
+    frozen: bool  # ждёт решения отложенного маркера: по сроку не выдаётся
+
+
+class Marker:
+    """Маркер, токен которого стоит шагом живого совпадения: действие ждёт, чем оно кончится.
+
+    Сработает совпадение с этим шагом — маркер отменяется; умрут все такие совпадения —
+    применяется так, как применился бы в свой момент.
+    """
+
+    __slots__ = ("kind", "steps", "time", "state", "holds")
+
+    def __init__(self, kind: str, steps: list[Step], time: float) -> None:
+        self.kind = kind  # "correction", "negation" или "break"
+        self.steps = steps  # шаги фразы с токенами из шаблонов: те самые объекты, см. `has`
+        self.time = time
+        self.state: str | None = None  # None — ждёт; "applied" или "cancelled"
+        self.holds: list[Hold] = []  # у поправки: ждущие на её момент
 
 
 class Negation:
     """Открытое отрицание: подавит первое завершённое совпадение с шагом после него."""
 
-    __slots__ = ("position", "time", "deadline")
+    __slots__ = ("position", "time", "deadline", "marker", "breaks")
 
-    def __init__(self, position: int, time: float, deadline: float) -> None:
+    def __init__(self, position: int, time: float, deadline: float, marker: Marker | None) -> None:
         self.position = position  # последний токен фразы отрицания
         self.time = time
         self.deadline = deadline  # закрывается, когда время станет больше
+        self.marker = marker  # отложенная фраза отрицания; None — отрицание открыто точно
+        self.breaks: list[Marker] = []  # отложенные разрывы и поправки: применятся — закроют
 
 
 class Hold:
     """Ждущее срабатывание: срок продлевают новые шаги совпадений с тем же первым шагом."""
 
-    __slots__ = ("scenario", "partial", "time", "hold", "deadline")
+    __slots__ = ("scenario", "partial", "time", "hold", "deadline", "waits")
 
     def __init__(self, scenario: str, partial: Partial, time: float, hold: float) -> None:
         self.scenario = scenario
@@ -187,6 +208,20 @@ class Hold:
         self.time = time  # момент завершения: от него считался cooldown
         self.hold = hold
         self.deadline = time + hold
+        self.waits: set[Marker | Victims] = set()  # чьего решения ждёт выдача
+
+
+class Victims:
+    """Срабатывания одного момента, которые подавило бы отрицание с отложенным маркером или
+    разрывом: подавляются, если маркер применится, а разрывы отменятся."""
+
+    __slots__ = ("marker", "breaks", "time", "holds")
+
+    def __init__(self, negation: Negation, holds: list[Hold]) -> None:
+        self.marker = negation.marker
+        self.breaks = list(negation.breaks)
+        self.time = negation.time
+        self.holds = holds
 
 
 class Miss(NamedTuple):
@@ -221,6 +256,29 @@ class Miss(NamedTuple):
     scenario: str | None
     need: float
     got: float
+
+
+def has(partial: Partial, steps: list[Step]) -> bool:
+    """Входит ли в совпадение один из шагов `steps`: тот же объект, а не равный ему.
+
+    Шаг по явному токену и шаг по `any` — разные объекты Step одного события (`Engine.push`).
+    """
+    low = min(step.position for step in steps)
+    for step in takewhile(lambda item: item.position >= low, partial.backwards()):
+        if any(step is mine for mine in steps):
+            return True
+    return False
+
+
+def pattern_tokens(scenarios: Iterable[Scenario]) -> set[str]:
+    """Токены шагов шаблонов, без запретов тишины."""
+    return {
+        step.token
+        for scenario in scenarios
+        for pattern in scenario.patterns
+        for step in pattern
+        if isinstance(step, PatternStep)
+    }
 
 
 def later(a: Partial, b: Partial) -> bool:
@@ -397,6 +455,20 @@ def due_time(last: float, gap: float) -> float:
     return last + gap - 4 * (math.ulp(last) + math.ulp(gap))
 
 
+def expiry(last: float, gap: float, sequence: bool) -> float:
+    """Последний момент, когда совпадение ещё не снято: снимается, когда время станет больше.
+
+    В бору снятие решает `now - last > gap`, в наборе `any` — `now > last + gap`.
+    """
+    deadline = last + gap
+    if sequence:
+        while deadline - last > gap:
+            deadline = math.nextafter(deadline, -math.inf)
+        while math.nextafter(deadline, math.inf) - last <= gap:
+            deadline = math.nextafter(deadline, math.inf)
+    return deadline
+
+
 def best(items: list[Partial], start: int, end: int, step: Step) -> Partial:
     """Лучшее продолжение `items[start:end]` событием: в месте после события останется оно одно.
 
@@ -498,6 +570,14 @@ class Engine:
       а дальше — как при снятии поправкой. Потом отрицание закрывается. Закрывают его и фраза из
       `negation_breaks`, и срок: `max_gap` корня от фразы, а затем от каждого нового шага любого
       совпадения. Фраза отрицания при открытом отрицании только продлевает срок.
+    - Маркер внутри шаблона: если токен маркера стал явным шагом совпадения (не шагом `any` и
+      не `any_vac`), действие маркера ждёт. Сработает совпадение с этим шагом — маркер
+      отменяется: для совпадения это обычный шаг. Умрут все такие совпадения — маркер
+      применяется так, как применился бы в свой момент: поправка снимает ждущие на её момент,
+      отрицание подавляет первые срабатывания после себя, разрыв закрывает отрицание с
+      момента разрыва. Срабатывания, которые от этого зависят, ждут решения и по сроку не
+      выдаются; копии префикса снятых отсчитывают задержку от момента решения. Пока маркер
+      ждёт, `next_deadline` включает сроки снятия совпадений, а `advance` их снимает.
     """
 
     def __init__(self, rules: RuleSet) -> None:
@@ -522,6 +602,12 @@ class Engine:
         # последние события: фраза ищется сравнением хвоста потока, её токены идут подряд
         self._said: deque[Step] = deque(maxlen=max(self._lengths, default=1))
         self._negation: Negation | None = None
+        self._marker_tokens = {token for phrase in self._phrases for token in phrase}
+        # токены маркеров, которые стоят шагами шаблонов: такой маркер может ждать решения
+        self._intercepting = self._marker_tokens & pattern_tokens(rules.scenarios)
+        self._deferred: list[Marker] = []  # маркеры, ждущие решения, по порядку
+        self._groups: list[Victims] = []  # срабатывания, которые подавит отложенное отрицание
+        self._used: list[Step] = []  # явные шаги последних событий в сработавших совпадениях
         # первые позиции совпадений, для которых событие стало шагом; None — вне режима поправок
         self._stepped: set[int] | None = None
         self._vocabulary = rules.vocabulary
@@ -621,6 +707,7 @@ class Engine:
             self._add_collectors(self._unordered[known:])
         self._cooldowns[scenario.name] = scenario.cooldown
         self._holds[scenario.name] = self._hold_of(scenario)
+        self._intercepting |= self._marker_tokens & pattern_tokens((scenario,))
         self._declared[scenario.name] = len(self._declared)
         self._min_confidences[scenario.name] = rules.confidence_threshold(scenario)
         self._vocabulary = vocabulary
@@ -634,7 +721,10 @@ class Engine:
     @property
     def held(self) -> list[Held]:
         """Срабатывания, которые ждут выдачи (режим поправок), в порядке завершения."""
-        return [Held(hold.scenario, hold.partial, hold.deadline) for hold in self._held]
+        return [
+            Held(hold.scenario, hold.partial, hold.deadline, bool(hold.waits))
+            for hold in self._held
+        ]
 
     @property
     def active_count(self) -> int:
@@ -687,8 +777,18 @@ class Engine:
         """Ближайший конец окна тишины или срок ждущего срабатывания: когда `advance` выдаст
         что-то без события. None — ждать нечего."""
         deadline = self._wheel.next_deadline()
-        if self._held:
-            first = min(hold.deadline for hold in self._held)
+        times = [hold.deadline for hold in self._held if not hold.waits]
+        if self._deferred:
+            # отложенный маркер решается, когда умрут совпадения: сроки снятия первых во фронтах
+            for front in self._all_fronts():
+                if len(front):
+                    place = front.place
+                    if isinstance(place, Cursor):
+                        times.append(expiry(front.first().last_time, place.max_gap, True))
+                    else:
+                        times.append(expiry(front.first().last_time, place[0].pattern.max_gap, False))
+        if times:
+            first = min(times)
             deadline = first if deadline is None else min(deadline, first)
         return deadline
 
@@ -706,6 +806,10 @@ class Engine:
         self._move(time, f"время {time}")
         self._misses = []
         matches = self._close(time)
+        if self._correcting:
+            # снятые по сроку решают отложенные маркеры: момент решения — когда умерло последнее
+            moment = self._expire(time, None, ())
+            matches += self._settle_markers(time if moment is None else moment)
         self._tick()
         return matches
 
@@ -713,9 +817,21 @@ class Engine:
         self._move(event.time, f"время {event.time} токена {event.token!r}")
         misses = self._misses = []
         matches = self._close(event.time)  # окна и ждущие, истёкшие раньше события
-        stepped = self._stepped = set() if self._correcting else None
-        step = Step(self._position, event)
+        step = wild = Step(self._position, event)
         self._position += 1
+        stepped = None
+        if self._correcting:
+            stepped = self._stepped = set()
+            if event.token in self._intercepting:
+                # токен события — маркер из шаблонов: шаг по явному токену и шаг по `any` — разные
+                # объекты, маркер перехватывает только явный шаг (`has`)
+                wild = Step(step.position, event)
+            if self._phrases:
+                self._said.append(step)
+                first = self._said[0].position
+                self._used = [used for used in self._used if used.position >= first]
+        token = event.token
+        explicit = wild is not step  # иначе все шаги события — один объект
         # токены шагов, к которым подходит событие: по ним ищут в индексах
         keys = fitting(event.token, self._vocabulary)
         completed: dict[str, list[Partial]] = {}  # сценарий → совпадения, завершённые этим событием
@@ -734,18 +850,20 @@ class Engine:
             self._wheel.cancel(timer)
             self._unlist(timer)
             misses.append(Miss("silence", window, partial, None, timer.deadline, event.time))
-        self._expire(event, keys)
+        self._expire(event.time, event, keys)
         for key in keys:
+            mine = wild if explicit and key != token else step
             for front in self._waiting.get(key, ()):
                 cursor = front.place
                 for edge in front.edges[key]:
-                    self._follow(front, edge, cursor.follow(edge), step, completed, entries)
+                    self._follow(front, edge, cursor.follow(edge), mine, completed, entries)
         for key in keys:
+            mine = wild if explicit and key != token else step
             for start in self._start_index.get(key, ()):
                 child = Cursor(self._starts[start], 1)
                 if event.score >= start.min_score:
                     # новое совпадение задержку не проверяет
-                    self._enter(child, Partial.begin(step), completed, entries)
+                    self._enter(child, Partial.begin(mine), completed, entries)
                     if stepped is not None:
                         stepped.add(step.position)
                 else:
@@ -755,33 +873,24 @@ class Engine:
             for collector in self._collector_index.get(key, ()):
                 if collector not in seen:
                     seen.add(collector)
-                    self._collect(collector, step, completed, entries)
+                    self._collect(collector, step, wild, completed, entries)
         for place, partial in entries:
             self._store(place, partial)
         # срабатывания выдаются после обхода: из совпадений сценария выбирается самое уверенное
-        matches += self._finish(completed, event.time)
-        if stepped:
-            # шаг родственника: совпадение с тем же первым шагом продолжает фразу
-            for hold in self._held:
-                if hold.partial.first_position in stepped:
-                    hold.deadline = max(hold.deadline, event.time + hold.hold)
-        negation = self._negation
-        if negation is not None and stepped:
-            negation.deadline = max(negation.deadline, event.time + self._defaults.max_gap)
-        if self._phrases:
-            self._said.append(step)
-            heard = self._heard()
-            if "correction" in heard:
-                self._cancel(self._held, event.time, "corrected")
-                self._negation = None
-            if "break" in heard:
-                self._negation = None
-            if "negation" in heard:
-                deadline = event.time + self._defaults.max_gap
-                if self._negation is None:
-                    self._negation = Negation(step.position, event.time, deadline)
-                else:
-                    self._negation.deadline = max(self._negation.deadline, deadline)
+        if completed:
+            matches += self._finish(completed, event.time)
+        if stepped is not None:
+            if stepped:
+                # шаг родственника: совпадение с тем же первым шагом продолжает фразу
+                for hold in self._held:
+                    if hold.partial.first_position in stepped:
+                        hold.deadline = max(hold.deadline, event.time + hold.hold)
+                negation = self._negation
+                if negation is not None:
+                    negation.deadline = max(negation.deadline, event.time + self._defaults.max_gap)
+            matches += self._settle_markers(event.time)
+            if self._phrases:
+                self._hear(step)
 
         self._recent.append(step)
         while self._recent and self._recent[0].event.time < event.time - self._lookback:
@@ -789,10 +898,143 @@ class Engine:
         self._tick()
         return matches
 
-    def _heard(self) -> dict[str, list[int]]:
-        """Фразы-маркеры, которые кончаются последним событием: что делают → позиции токенов."""
+    def _hear(self, step: Step) -> None:
+        """Маркеры, которые кончаются событием `step`: действуют сразу, отменены или ждут."""
+        heard = self._heard()
+        for kind in ("correction", "break", "negation"):
+            if kind not in heard:
+                continue
+            mine = [item for item in heard[kind] if item.event.token in self._intercepting]
+            if any(item is used for item in mine for used in self._used):
+                continue  # маркер — шаг сработавшего совпадения: действие отменено
+            if mine and self._alive(mine):
+                self._defer(kind, mine, step)
+            else:
+                self._act(kind, step)
+
+    def _act(self, kind: str, step: Step) -> None:
+        time = step.event.time
+        if kind == "correction":
+            self._cancel(self._held, time, "corrected")
+            self._negation = None
+        elif kind == "break":
+            self._negation = None
+        else:
+            deadline = time + self._defaults.max_gap
+            if self._negation is None:
+                self._negation = Negation(step.position, time, deadline, None)
+            else:
+                self._negation.deadline = max(self._negation.deadline, deadline)
+
+    def _defer(self, kind: str, steps: list[Step], step: Step) -> None:
+        """Маркер ждёт решения: поправка держит ждущие и открытое отрицание, разрыв — отрицание,
+        отрицание открывается под вопросом."""
+        time = step.event.time
+        marker = Marker(kind, steps, time)
+        negation = self._negation
+        if kind == "correction":
+            if not self._held and negation is None:
+                return  # снимать и закрывать нечего
+            marker.holds = list(self._held)
+            for hold in self._held:
+                hold.waits.add(marker)
+            if negation is not None:
+                negation.breaks.append(marker)
+        elif kind == "break":
+            if negation is None:
+                return
+            negation.breaks.append(marker)
+        else:
+            deadline = time + self._defaults.max_gap
+            if negation is not None:
+                negation.deadline = max(negation.deadline, deadline)
+                return
+            self._negation = Negation(step.position, time, deadline, marker)
+        self._deferred.append(marker)
+
+    def _alive(self, steps: list[Step]) -> bool:
+        """Стоит ли один из шагов маркера явным шагом живого совпадения."""
+        partials = chain(
+            (partial for front in self._all_fronts() for partial in front),
+            (timer.payload.partial for timer in self._hushes),
+        )
+        return any(has(partial, steps) for partial in partials)
+
+    def _witness(self, partials: list[Partial], time: float) -> None:
+        """Совпадения момента, которые сработают: маркер, ставший их шагом, отменяется."""
+        said = [step for step in self._said if step.event.token in self._intercepting]
+        self._used += [step for step in said if any(has(partial, [step]) for partial in partials)]
+        for marker in list(self._deferred):
+            if any(has(partial, marker.steps) for partial in partials):
+                self._settle(marker, "cancelled", time)
+
+    def _settle_markers(self, moment: float) -> list[Match]:
+        """Отложенные маркеры, у которых умерли все совпадения с их шагом, применяются в
+        `moment`; ждущие, которых больше ничто не держит, выдаются, если срок уже прошёл."""
+        for marker in list(self._deferred):
+            if not self._alive(marker.steps):
+                self._settle(marker, "applied", moment)
+        now = self._last_time
+        return self._release(lambda due: due < now) if self._held else []
+
+    def _unfreeze(self, hold: Hold, wait: "Marker | Victims", moment: float) -> None:
+        """Маркер больше не держит ждущее; отпущенное после срока выдаётся после `moment`."""
+        hold.waits.discard(wait)
+        if not hold.waits:
+            hold.deadline = max(hold.deadline, moment)
+
+    def _settle(self, marker: Marker, state: str, moment: float) -> None:
+        marker.state = state
+        self._deferred.remove(marker)
+        if marker.kind == "correction":
+            frozen = [hold for hold in marker.holds if hold in self._held]
+            if state == "applied":
+                self._cancel(frozen, moment, "corrected")
+            else:
+                for hold in frozen:
+                    self._unfreeze(hold, marker, moment)
+        negation = self._negation
+        if negation is not None:
+            if negation.marker is marker:
+                if state == "cancelled":
+                    self._negation = None
+                else:
+                    negation.marker = None
+            elif marker in negation.breaks:
+                if state == "applied":
+                    self._negation = None
+                else:
+                    negation.breaks.remove(marker)
+        for group in list(self._groups):
+            self._judge(group, moment)
+
+    def _judge(self, group: Victims, moment: float) -> None:
+        """Подавить срабатывания группы или отпустить их, если маркеры уже решены."""
+        marker, breaks = group.marker, group.breaks
+        if (marker is not None and marker.state == "cancelled") or any(
+            item.state == "applied" for item in breaks
+        ):
+            for hold in group.holds:
+                self._unfreeze(hold, group, moment)
+        elif (marker is None or marker.state == "applied") and all(
+            item.state == "cancelled" for item in breaks
+        ):
+            victims = [hold for hold in group.holds if hold in self._held]
+            self._cancel(victims, moment, "negated", group.time)
+        else:
+            return
+        self._groups.remove(group)
+
+    def _all_fronts(self) -> list[Front]:
+        return [
+            *self._fronts.values(),
+            *(front for collector in self._collectors for front in collector.states.values()),
+        ]
+
+    def _heard(self) -> dict[str, list[Step]]:
+        """Фразы-маркеры, которые кончаются последним событием: что делают → шаги их токенов."""
         said = list(self._said)
-        heard: dict[str, list[int]] = {}
+        heard: dict[str, list[Step]] = {}
         for length in self._lengths:
             if length > len(said):
                 break
@@ -801,11 +1043,16 @@ class Engine:
             if kind is not None and all(
                 step.event.score >= self._defaults.min_score for step in tail
             ):
-                heard.setdefault(kind, []).extend(step.position for step in tail)
+                heard.setdefault(kind, []).extend(tail)
         return heard
 
-    def _cancel(self, holds: list[Hold], time: float, reason: str) -> None:
-        """Снимает ждущие срабатывания: токены и cooldown освобождаются, как будто их не было."""
+    def _cancel(
+        self, holds: list[Hold], time: float, reason: str, need: float | None = None
+    ) -> None:
+        """Снимает ждущие срабатывания: токены и cooldown освобождаются, как будто их не было.
+
+        `need` отказа — срок выдачи снятого, у подавленного отрицанием — момент отрицания.
+        """
         if not holds:
             return
         gone = set(holds)
@@ -816,7 +1063,8 @@ class Engine:
             )
             self._taken_count -= hold.partial.count
             self._active_count -= 1
-            self._misses.append(Miss(reason, None, hold.partial, hold.scenario, hold.deadline, time))
+            missed = hold.deadline if need is None else need
+            self._misses.append(Miss(reason, None, hold.partial, hold.scenario, missed, time))
         self._kept = min(self._kept, self._taken_count)
         for scenario in {hold.scenario for hold in holds}:
             times = [hold.time for hold in self._held if hold.scenario == scenario]
@@ -852,10 +1100,7 @@ class Engine:
             own = prefixes.get(partial.first_position)
             return own is not None and tuple(partial.positions()) in own
 
-        for front in (
-            *self._fronts.values(),
-            *(front for collector in self._collectors for front in collector.states.values()),
-        ):
+        for front in self._all_fronts():
             self._rework(front, shares, copies, time, reason)
         for timer in [timer for timer in self._hushes if shares(timer.payload.partial)]:
             window, partial = timer.payload
@@ -934,9 +1179,13 @@ class Engine:
         heapq.heappush(self._deadlines, (due, next(self._order), front))
         front.queued = True
 
-    def _expire(self, event: Event, keys: tuple[str, ...]) -> None:
-        """Снимает кандидатов, срок которых к событию истёк: во фронте это голова."""
-        now = event.time
+    def _expire(self, now: float, event: Event | None, keys: tuple[str, ...]) -> float | None:
+        """Снимает кандидатов, срок которых к `now` истёк: во фронте это голова.
+
+        Без события (`advance` в режиме поправок) возвращает самый поздний срок снятых: тогда
+        умерло последнее из них; None — никого не сняли.
+        """
+        latest: float | None = None
         due: list[Front] = []
         while self._deadlines and self._deadlines[0][0] <= now:
             due.append(heapq.heappop(self._deadlines)[2])
@@ -955,6 +1204,8 @@ class Engine:
                         for edge in edges
                     ] or [Miss("expired", place, partial, None, last + gap, now)]
                     self._active_count -= 1
+                    if event is None:
+                        latest = max(expiry(last, gap, True), latest or -math.inf)
             else:
                 collector, filled = place
                 gap = collector.pattern.max_gap
@@ -962,15 +1213,20 @@ class Engine:
                 while len(front) and now > front.first().last_time + gap:
                     if reason is None:
                         # задержка у открытых шагов одна: «опоздал», если событие закрыло бы шаг
-                        groups = collector.fitting(event.token, self._vocabulary)
-                        late = any(mask & ~filled for _, mask in groups)
-                        reason = "late" if late else "expired"
+                        if event is None:
+                            reason = "expired"
+                        else:
+                            groups = collector.fitting(event.token, self._vocabulary)
+                            late = any(mask & ~filled for _, mask in groups)
+                            reason = "late" if late else "expired"
                     partial = front.pop_first()
                     deadline = partial.last_time + gap
                     self._misses.append(
                         Miss(reason, collector.place(filled), partial, None, deadline, now)
                     )
                     self._active_count -= 1
+                    if event is None:
+                        latest = max(deadline, latest or -math.inf)
             if len(front):
                 self._schedule(front)
             elif isinstance(place, Cursor):
@@ -982,6 +1238,7 @@ class Engine:
                         del self._waiting[token]
             else:
                 del place[0].states[place[1]]
+        return latest
 
     def _follow(
         self,
@@ -1062,16 +1319,23 @@ class Engine:
         self,
         collector: Collector,
         step: Step,
+        wild: Step,
         completed: dict[str, list[Partial]],
         entries: list,
     ) -> None:
-        """Событие в шаблоне `any`: закрывает открытые шаги у его состояний и начинает новые."""
+        """Событие в шаблоне `any`: закрывает открытые шаги у его состояний и начинает новые.
+
+        `wild` — шаг события для шагов набора `any` и `any_vac` (`Engine.push`).
+        """
         event = step.event
         pattern = collector.pattern
         length = len(pattern.slots)
         threshold = pattern.min_confidence
 
-        def gather(target: int, items: list[Partial], start: int) -> None:
+        def pick(index: int) -> Step:
+            return step if pattern.slots[index].token == event.token else wild
+
+        def gather(target: int, items: list[Partial], start: int, step: Step) -> None:
             """Продолжения `items[start:]` событием входят в состояние `target`."""
             if self._stepped is not None:
                 self._stepped.update(items[index].first_position for index in range(start, len(items)))
@@ -1097,7 +1361,7 @@ class Engine:
         for filled, front in collector.states.items():
             free, low = collector.closes(filled, groups, event.score)
             for index in free:
-                gather(filled | 1 << index, front.items, front.head)
+                gather(filled | 1 << index, front.items, front.head, pick(index))
             for index in low:
                 need = pattern.slots[index].min_score
                 place = collector.place(filled)
@@ -1109,7 +1373,7 @@ class Engine:
         if free and self._stepped is not None:
             self._stepped.add(step.position)
         for index in free:
-            partial = Partial.begin(step)
+            partial = Partial.begin(pick(index))
             target = 1 << index
             if target == collector.full:
                 completed.setdefault(pattern.scenario, []).append(partial)
@@ -1134,9 +1398,9 @@ class Engine:
         # окна с одним сроком закрываются в один момент, как совпадения одного события
         fired = self._wheel.advance(now)
         for deadline, timers in groupby(fired, key=lambda timer: timer.deadline):
-            if self._held:
+            if self._correcting:
                 matches += self._release(lambda due: due <= deadline)
-            self._expire_negation(deadline)
+                self._expire_negation(deadline)
             completed: dict[str, list[Partial]] = {}
             for timer in timers:
                 self._unlist(timer)
@@ -1144,9 +1408,9 @@ class Engine:
                 # после тишины не бывает тишины (rules.py), поэтому окна здесь не открываются
                 self._enter(window.child, partial._replace(last_time=deadline), completed, None)
             matches += self._finish(completed, deadline)
-        if self._held:
+        if self._correcting:
             matches += self._release(lambda due: due < now)
-        self._expire_negation(now)
+            self._expire_negation(now)
         return matches
 
     def _expire_negation(self, now: float) -> None:
@@ -1155,11 +1419,14 @@ class Engine:
 
     def _release(self, due: Callable[[float], bool]) -> list[Match]:
         """Выдаёт ждущие срабатывания, срок которых прошёл (`due`): по срокам, один срок — один
-        момент, внутри момента — как у `_finish`."""
-        ready = [hold for hold in self._held if due(hold.deadline)]
+        момент, внутри момента — как у `_finish`. Ждущие решения маркера не выдаются."""
+        if not self._held:
+            return []
+        ready = [hold for hold in self._held if not hold.waits and due(hold.deadline)]
         if not ready:
             return []
-        self._held = [hold for hold in self._held if not due(hold.deadline)]
+        gone = set(ready)
+        self._held = [hold for hold in self._held if hold not in gone]
         self._active_count -= len(ready)
         for hold in ready:
             self._settled_at[hold.scenario] = max(
@@ -1218,21 +1485,36 @@ class Engine:
 
     def _finish(self, completed: dict[str, list[Partial]], time: float) -> list[Match]:
         """Срабатывания одного момента: от начавшегося раньше, при равном начале — по объявлению."""
+        chosen = []  # (сценарий, его совпадение): прошли порог, повтор и cooldown
+        for scenario, partials in completed.items():
+            best = self._choose(scenario, partials, time)
+            if best is not None:
+                chosen.append((scenario, best))
+        if self._intercepting and chosen:
+            self._witness([best for _, best in chosen], time)
         matches = []
         suppressed: list[Partial] = []  # подавленные отрицанием: все срабатывания момента
-        for scenario, partials in completed.items():
-            match = self._fire(scenario, partials, time, suppressed)
+        victims: list[Hold] = []  # подавит отрицание, если отложенные маркеры решатся так
+        for scenario, best in chosen:
+            match = self._fire(scenario, best, time, suppressed, victims)
             if match is not None:
                 matches.append(match)
-        if suppressed:
+        if suppressed or victims:
+            negation = self._negation
             self._negation = None
-            self._withdraw(suppressed, time, "negated")
+            if victims:
+                group = Victims(negation, victims)
+                for hold in victims:
+                    hold.waits.add(group)
+                self._groups.append(group)
+            else:
+                self._withdraw(suppressed, time, "negated")
         matches.sort(key=lambda match: (match.steps[0].position, self._declared[match.scenario]))
         return matches
 
-    def _fire(
-        self, scenario: str, partials: list[Partial], time: float, suppressed: list[Partial]
-    ) -> Match | None:
+    def _choose(self, scenario: str, partials: list[Partial], time: float) -> Partial | None:
+        """Совпадение, которым сработает сценарий: самое уверенное из прошедших порог и повтор,
+        если сценарий не молчит по cooldown."""
         taken = self._taken.setdefault(scenario, set())
         eligible = [
             partial
@@ -1264,18 +1546,35 @@ class Engine:
             until = fired_at + self._cooldowns[scenario]
             self._misses.append(Miss("cooldown", None, best, scenario, until, time))
             return None
+        return best
+
+    def _fire(
+        self,
+        scenario: str,
+        best: Partial,
+        time: float,
+        suppressed: list[Partial],
+        victims: list[Hold],
+    ) -> Match | None:
+        """Срабатывание: выдаётся сразу, ждёт выдачи или подавлено отрицанием."""
         hold = self._holds[scenario]
         negation = self._negation
+        tentative = False  # отрицание с отложенным маркером или разрывом
         if hold > 0 and negation is not None and best.tail.step.position > negation.position:
-            self._misses.append(Miss("negated", None, best, scenario, negation.time, time))
-            suppressed.append(best)
-            return None
-        taken.update(step.position for step in best.backwards())
+            if negation.marker is None and not negation.breaks:
+                self._misses.append(Miss("negated", None, best, scenario, negation.time, time))
+                suppressed.append(best)
+                return None
+            tentative = True
+        self._taken[scenario].update(step.position for step in best.backwards())
         self._taken_count += best.count  # позиции новые: проверено выше
         self._fired_at[scenario] = time
         if hold > 0:
-            self._held.append(Hold(scenario, best, time, hold))
+            held = Hold(scenario, best, time, hold)
+            self._held.append(held)
             self._active_count += 1
+            if tentative:
+                victims.append(held)
             return None
         if self._correcting:
             self._settled_at[scenario] = time

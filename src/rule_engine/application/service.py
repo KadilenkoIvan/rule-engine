@@ -131,6 +131,7 @@ def frame(
                 tuple(map(event_view, item.partial.steps)),
                 item.partial.confidence,
                 item.until,
+                item.frozen,
             )
             for item in engine.held
         ),

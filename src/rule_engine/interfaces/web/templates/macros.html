@@ -65,10 +65,10 @@
 {% endmacro %}
 
 {% macro title(frame) %}
-{% if frame.event is none and frame.matches and frame.matches|selectattr("released", "none")|list|length == 0 %}
-⏱ <span class="muted">без события: срок выдачи кончился @ {{ frame.time|g }}</span>
-{% elif frame.event is none %}
-⏱ <span class="muted">без события: окно тишины кончилось @ {{ frame.time|g }}</span>
+{% if frame.event is none %}
+{# в режиме поправок кадр по таймеру бывает и от срока выдачи, и от снятия совпадения по сроку #}
+{% set reasons = frame.misses|map(attribute="reason")|list %}
+⏱ <span class="muted">без события: {% if frame.matches|rejectattr("released", "none")|list %}срок выдачи кончился{% elif "negated" in reasons or "corrected" in reasons %}маркер решён{% elif "expired" in reasons %}совпадения сняты по сроку{% else %}окно тишины кончилось{% endif %} @ {{ frame.time|g }}</span>
 {% else %}
 <span class="muted">#{{ frame.event.position }}</span> {{ frame.event.token }}
 <span class="muted">{{ frame.event.score|score }} @ {{ frame.event.time|g }}</span>
@@ -130,7 +130,7 @@
       <td>{{ item.scenario }}</td>
       <td>{{ steps(item.steps) }}</td>
       <td>{{ item.confidence|score }}</td>
-      <td>после {{ item.until|g }} <span class="muted">ещё {{ "%.1f"|format(item.until - frame.time) }} с</span></td>
+      <td>{% if item.frozen %}ждёт решения маркера, {% endif %}после {{ item.until|g }} <span class="muted">ещё {{ "%.1f"|format(item.until - frame.time) }} с</span></td>
     </tr>
     {% endfor %}
   </tbody>
