@@ -1,4 +1,4 @@
-"""Веб-интерфейс: собирает контроллер и отдаёт его тонкому слою фреймворка."""
+"""Web interface: builds the controller and hands it to the thin framework layer."""
 
 import argparse
 from pathlib import Path
@@ -12,10 +12,17 @@ STATIC = Path(__file__).parent / "static"
 
 
 class WebInterface:
+    """Web server over a folder of example rules and streams."""
+
     def __init__(self, service: RuleEngineService) -> None:
         self._service = service
 
     def run(self, argv: list[str]) -> int:
+        """Parses the arguments and serves until stopped; returns the exit code.
+
+        Raises:
+            ValueError: the examples folder does not exist.
+        """
         parser = argparse.ArgumentParser(prog="rule-engine web")
         parser.add_argument("examples", type=Path, help="папка с правилами *.json и потоками *.txt")
         parser.add_argument("--host", default="127.0.0.1")

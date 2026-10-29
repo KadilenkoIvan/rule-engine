@@ -1,6 +1,6 @@
-"""Токены шагов для интерфейсов: подписи `any` и `any_vac` и правило «токен подходит к шагу».
+"""Step tokens for interfaces: labels of `any` and `any_vac` and the fit rule.
 
-Правило одно, из домена: веб ищет по нему место срабатывания и не держит своей копии.
+The rule is the domain's: the web finds where a match ended by it and keeps no copy.
 """
 
 from rule_engine.domain.rules import ANY, ANY_VOCABULARY, fits
@@ -11,5 +11,5 @@ __all__ = ["fits", "token_label"]
 
 
 def token_label(token: str) -> str:
-    """Подпись токена шага: `any` и `any_vac` словами, остальные как есть."""
+    """Label of a step token: `any` and `any_vac` in words, others as they are."""
     return LABELS.get(token, token)

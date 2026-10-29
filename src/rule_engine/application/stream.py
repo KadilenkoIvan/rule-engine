@@ -1,4 +1,4 @@
-"""Формат потока: строка на событие или метку времени. Общий для файла CLI и веб-формы."""
+"""Stream format: a line per event or time mark, shared by CLI files and the web form."""
 
 from collections.abc import Iterable, Iterator
 
@@ -7,12 +7,17 @@ from rule_engine.domain.engine import Event
 
 
 def parse_stream(lines: Iterable[str]) -> Iterator[Event | float]:
-    """Строка потока: «токен уверенность время» или метка «время». Пустые строки и строки с #
-    пропускаются.
+    """Parses stream lines: «token score time» or a time mark «time».
 
-    Токеном считается всё до двух последних полей, поэтому в нём бывают пробелы:
-    `<громкий звук> 0.62 12.4`. Метка — строка из одного числа: время прошло без события, и окна
-    тишины, кончившиеся раньше него, закрываются.
+    Empty lines and lines starting with # are skipped. The token is everything before the last
+    two fields, so it may contain spaces: `<громкий звук> 0.62 12.4`. A mark moves time without
+    an event.
+
+    Yields:
+        Events and time marks.
+
+    Raises:
+        ValueError: a line has another format.
     """
     for number, line in enumerate(lines, start=1):
         text = line.strip()
@@ -37,7 +42,12 @@ def parse_stream(lines: Iterable[str]) -> Iterator[Event | float]:
 
 
 def check_token(token: str) -> None:
-    """Токен, который строка потока прочитает обратно тем же: живая сессия пишется в поток."""
+    """Checks that a stream line reads the token back unchanged: live sessions are saved as
+    streams.
+
+    Raises:
+        ValueError: the token is empty, padded with spaces, multi-line or starts with #.
+    """
     if token.splitlines() != [token] or token != token.strip() or token.startswith("#"):
         raise ValueError(
             f"токен {token!r} не записать строкой потока: он пустой, с пробелами по краям, с "
@@ -46,9 +56,9 @@ def check_token(token: str) -> None:
 
 
 def stream_line(frame: Frame) -> str:
-    """Кадр строкой потока: событие — «токен уверенность время», ход таймера — метка времени.
+    """Frame as a stream line: «token score time» for an event, a time mark for a timer move.
 
-    Числа записываются точно (`repr`), поэтому `parse_stream` даст те же события и метки.
+    Numbers are written exactly (`repr`), so `parse_stream` reads the same events and marks.
     """
     if frame.event is None:
         return repr(frame.time)
