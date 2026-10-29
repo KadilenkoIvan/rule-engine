@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable
 from typing import NamedTuple
 
-from rule_engine.domain.engine import Engine, Event, Match, Miss, Step, Waiting
+from rule_engine.domain.engine import Engine, Event, Held, Match, Miss, Step, Waiting
 from rule_engine.domain.graph import Node, Start
 from rule_engine.domain.rules import RuleSet
 from rule_engine.domain.unordered import Unordered
@@ -18,9 +18,10 @@ class Update(NamedTuple):
     # могут прийти получателю не по порядку
     number: int
     time: float  # секунды по часам движка
-    step: Step | None  # None — ход таймера: кончилось окно тишины
+    step: Step | None  # None — ход таймера: кончилось окно тишины или срок выдачи
     matches: tuple[Match, ...]
     waiting: tuple[Waiting, ...]
+    held: tuple[Held, ...]  # режим поправок: сработавшие сценарии, чья выдача ждёт срока
     misses: tuple[Miss, ...]
 
 
@@ -31,7 +32,8 @@ class LiveEngine:
       успеет сдвинуть время вперёд, и событие окажется в прошлом.
     - `clock` по умолчанию — `time.monotonic`: он не идёт назад, а время движка не убывает. Время
       в живом режиме нужно только для сроков, поэтому шкала — своя, не Unix time.
-    - Таймер-поток спит до `next_deadline()` и вызывает `advance`. Сроков нет — спит, пока его не
+    - Таймер-поток спит до `next_deadline()` (конец окна тишины или срок выдачи в режиме
+      поправок) и вызывает `advance`. Сроков нет — спит, пока его не
       разбудят. Событие будит его: оно могло открыть окно с более ранним сроком.
     - `on_update` зовётся вне блокировки: из потока, вызвавшего `push_now`, или из таймер-потока.
       Медленный обработчик не держит движок. Порядок восстанавливается по `Update.number`.
@@ -109,5 +111,6 @@ class LiveEngine:
             step,
             tuple(matches),
             tuple(self._engine.snapshot()),
+            tuple(self._engine.held),
             tuple(self._engine.misses),
         )

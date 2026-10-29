@@ -49,6 +49,8 @@ REASONS = {
     "silence": ("тишина", "late"),
     "cooldown": ("cooldown", "late"),
     "repeat": ("повтор", "repeat"),
+    "corrected": ("поправка", "marker"),
+    "negated": ("отрицание", "marker"),
 }
 
 
@@ -181,6 +183,18 @@ class Paths:
         """Отказ словами: что не продвинулось, и с чем сравнили."""
         score = f"уверенность {miss.got:.2f} ниже порога {miss.need:g}"
         late = f"ждали до {miss.need:g}, а токен пришёл в {miss.got:g}"
+        if miss.reason in ("corrected", "negated"):
+            if miss.reason == "corrected" and miss.scenario is not None:
+                return f"«{miss.scenario}» снят поправкой в {miss.got:g}: ждал выдачи до {miss.need:g}"
+            if miss.scenario is not None:
+                return f"«{miss.scenario}» подавлен отрицанием, открытым в {miss.need:g}"
+            where = (
+                f"набор {self.set_name(miss.place)}"
+                if miss.kind == "set"
+                else f"«{' → '.join(self.labels[miss.place])}»"
+            )
+            what = "снятого" if miss.reason == "corrected" else "подавленного"
+            return f"{where} снято: в нём последний токен {what} срабатывания"
         if miss.reason in ("confidence", "repeat", "cooldown"):
             head = f"«{miss.scenario}» не сработал"
             if miss.reason == "confidence":
@@ -246,7 +260,7 @@ class Paths:
         position = frame.event.position
         used = any(
             step.position == position
-            for item in (*frame.waiting, *frame.matches)
+            for item in (*frame.waiting, *frame.held, *frame.matches)
             for step in item.steps
         )
         return Notes(

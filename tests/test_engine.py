@@ -6,6 +6,7 @@ from rule_engine import Engine, Event, RuleSet
 
 RULES = RuleSet.from_dict(
     {
+        "self_correction": False,
         "max_gap": 3.0,
         "min_score": 0.5,
         "min_confidence": 0.6,

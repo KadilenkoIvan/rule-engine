@@ -13,6 +13,7 @@ from rule_engine.application.views import (
     EventView,
     Frame,
     GraphView,
+    HeldView,
     MatchView,
     MissView,
     NodeView,
@@ -98,10 +99,10 @@ def frames(engine: Engine, index: Index, lines: Iterable[str]) -> Iterator[Frame
 
 
 def timer_frames(engine: Engine, index: Index, until: float) -> Iterator[Frame]:
-    """Кадр на каждый конец окна тишины раньше `until`: время прошло без события.
+    """Кадр на каждый конец окна тишины и срок выдачи раньше `until`: время прошло без события.
 
-    Движок закрывает окно, когда время станет больше его срока, поэтому время сдвигается на
-    ближайшее число после срока, а кадр показывает сам срок.
+    Движок закрывает окно и выдаёт ждущее, когда время станет больше срока, поэтому время
+    сдвигается на ближайшее число после срока, а кадр показывает сам срок.
     """
     while (deadline := engine.next_deadline()) is not None and deadline < until:
         matches = engine.advance(math.nextafter(deadline, math.inf))
@@ -115,10 +116,25 @@ def frame(
         time,
         event,
         tuple(
-            MatchView(match.scenario, tuple(map(event_view, match.steps)), match.confidence)
+            MatchView(
+                match.scenario,
+                tuple(map(event_view, match.steps)),
+                match.confidence,
+                match.released,
+            )
             for match in matches
         ),
         tuple(waiting_view(item, index) for item in engine.snapshot()),
+        tuple(
+            HeldView(
+                item.scenario,
+                tuple(map(event_view, item.partial.steps)),
+                item.partial.confidence,
+                item.until,
+                item.frozen,
+            )
+            for item in engine.held
+        ),
         tuple(miss_view(miss, index) for miss in engine.misses),
     )
 

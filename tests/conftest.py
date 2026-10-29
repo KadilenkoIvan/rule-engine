@@ -20,6 +20,7 @@ def make_rules():
                             tokens.add(step["token"])
             vocabulary = sorted(tokens - {"any", "any_vac"})
         return RuleSet.from_dict({
+            "self_correction": False,
             "max_gap": 3.0,
             "min_score": 0.5,
             "min_confidence": 0.5,

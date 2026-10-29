@@ -11,6 +11,7 @@
 import math
 from collections import deque
 from collections.abc import Iterable
+from dataclasses import replace
 from itertools import groupby
 
 from rule_engine.domain.engine import (
@@ -140,13 +141,7 @@ class ReferenceEngine:
             for token in step_tokens(step)
         } - self._vocabulary - WILDCARDS
         vocabulary = self._vocabulary | new_tokens if new_tokens else self._vocabulary
-        rules = RuleSet(
-            vocabulary,
-            (scenario,),
-            self._defaults.max_gap,
-            self._defaults.min_score,
-            self._defaults.min_confidence,
-        )
+        rules = replace(self._defaults, vocabulary=vocabulary, scenarios=(scenario,))
         if scenario.order == "sequence":
             for old, prefix, cut in insert_scenario(self._starts, rules, scenario).splits:
 

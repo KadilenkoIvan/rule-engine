@@ -85,7 +85,7 @@ def random_rules(rng, count=7):
         scenarios = [random_scenario(rng, f"s{index}") for index in range(rng.randint(1, count))]
         try:
             rules = RuleSet.from_dict({
-                "max_gap": 2.0, "min_score": 0.3, "min_confidence": 0.3,
+                "self_correction": False, "max_gap": 2.0, "min_score": 0.3, "min_confidence": 0.3,
                 "vocabulary": [*TOKENS, "e", "x"], "scenarios": scenarios,
             })
             ReferenceEngine(rules)

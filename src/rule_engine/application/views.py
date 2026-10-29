@@ -65,6 +65,17 @@ class MatchView(NamedTuple):
     scenario: str
     steps: tuple[EventView, ...]
     confidence: float
+    released: float | None  # режим поправок: срок, после которого выдано; None — выдано сразу
+
+
+class HeldView(NamedTuple):
+    """Сработавший сценарий, чья выдача ждёт срока (режим поправок)."""
+
+    scenario: str
+    steps: tuple[EventView, ...]
+    confidence: float
+    until: float  # выдаётся, когда время станет больше
+    frozen: bool  # ждёт решения маркера, токен которого стоит шагом живого совпадения
 
 
 class WaitingView(NamedTuple):
@@ -83,7 +94,8 @@ class MissView(NamedTuple):
     """Почему событие не продвинуло совпадение или не дало сработать сценарию.
 
     `reason` и смысл `need` и `got` — как у `Miss` в движке: `"score"`, `"late"`, `"expired"`,
-    `"pruned"`, `"silence"`, `"confidence"`, `"repeat"`, `"cooldown"`.
+    `"pruned"`, `"silence"`, `"confidence"`, `"repeat"`, `"cooldown"`, `"corrected"`,
+    `"negated"`.
     """
 
     reason: str
@@ -104,4 +116,5 @@ class Frame:
     event: EventView | None  # None — кадр по таймеру
     matches: tuple[MatchView, ...]
     waiting: tuple[WaitingView, ...]
+    held: tuple[HeldView, ...]  # ждут выдачи
     misses: tuple[MissView, ...]  # что событие не продвинуло и почему
