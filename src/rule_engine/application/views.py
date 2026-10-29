@@ -93,7 +93,7 @@ class MissView(NamedTuple):
     """Почему событие не продвинуло совпадение или не дало сработать сценарию.
 
     `reason` и смысл `need` и `got` — как у `Miss` в движке: `"score"`, `"late"`, `"expired"`,
-    `"pruned"`, `"silence"`, `"confidence"`, `"repeat"`, `"cooldown"`.
+    `"pruned"`, `"silence"`, `"confidence"`, `"repeat"`, `"cooldown"`, `"corrected"`.
     """
 
     reason: str

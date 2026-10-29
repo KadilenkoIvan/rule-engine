@@ -88,3 +88,41 @@ def test_hold_zero_and_disabled_mode_emit_at_once(make_rules):
     off.push(Event("b", 0.9, 0.0))
     assert names(off.push(Event("c", 0.9, 0.5))) == ["pair"]
     assert off.held == []
+
+
+def test_correction_cancels_held_and_frees_tokens_and_cooldown(make_rules):
+    engine = Engine(corrected(make_rules, [
+        {"name": "pair", "cooldown": 60.0, "patterns": [["a", "b"]]},
+        {"name": "alarm", "hold": 0.0, "patterns": [["s"]]},
+    ]))
+    engine.push(Event("a", 0.9, 0.0))
+    engine.push(Event("b", 0.9, 0.5))
+    engine.push(Event("ой", 0.9, 1.0))
+    assert engine.held == []
+    assert [(miss.reason, miss.scenario) for miss in engine.misses] == [("corrected", "pair")]
+    # снятое не держит cooldown и токены: та же команда снова ждёт выдачи
+    engine.push(Event("b", 0.9, 1.5))
+    assert names(engine.advance(5.0)) == ["pair"]
+    assert names(engine.push(Event("s", 0.9, 6.0))) == ["alarm"]  # hold 0: поправке не подлежит
+
+
+def test_correction_withdraws_last_token_and_restarts_prefix_copies(make_rules):
+    engine = Engine(corrected(make_rules, [
+        {"name": "ab", "patterns": [["a", "b"]]},
+        {"name": "abcd", "patterns": [["a", "b", "c", "d"]]},
+        {"name": "cd", "patterns": [["c", "d"]]},
+        {"name": "ae", "patterns": [["a", {"token": "e", "max_gap": 1.0}]]},
+    ]))
+    for token, time in [("a", 0.0), ("b", 0.4), ("ой", 0.8), ("c", 1.2), ("d", 1.5)]:
+        engine.push(Event(token, 0.9, time))
+    # «a b» снято вместе с «ab»: «abcd» не собирается; копия «a» ждёт e от поправки 0.8
+    engine.push(Event("e", 0.9, 1.7))
+    assert names(engine.advance(5.0)) == ["cd", "ae"]
+
+
+def test_marker_needs_consecutive_tokens_with_enough_score(make_rules):
+    engine = Engine(corrected(make_rules, [{"name": "pair", "patterns": [["a", "b"]]}]))
+    for token, score, time in [("a", 0.9, 0.0), ("b", 0.9, 0.2), ("а", 0.9, 0.4), ("x", 0.9, 0.5),
+                               ("нет", 0.9, 0.6), ("ой", 0.3, 0.8)]:
+        engine.push(Event(token, score, time))
+    assert names(engine.advance(5.0)) == ["pair"]

@@ -12,7 +12,7 @@ from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
-from itertools import count, groupby, islice
+from itertools import count, groupby, islice, takewhile
 from typing import NamedTuple
 
 from rule_engine.domain.graph import (
@@ -27,6 +27,7 @@ from rule_engine.domain.graph import (
 )
 from rule_engine.domain.rules import (
     WILDCARDS,
+    Phrase,
     RuleSet,
     Scenario,
     SilenceStep,
@@ -192,9 +193,12 @@ class Miss(NamedTuple):
     - `"confidence"`: шаблон сценария собран, но общая уверенность `got` ниже порога `need`.
     - `"repeat"`: шаблон собран, но его токен уже вошёл в выданное срабатывание сценария.
     - `"cooldown"`: шаблон собран, но сценарий молчит до `need`.
+    - `"corrected"` (режим поправок): поправка в `got` сняла ждущее срабатывание `scenario`,
+      которое ждало выдачи до `need`, или частичное совпадение в `place`, в которое входит
+      последний токен снятого срабатывания (тогда `need` = `got`).
 
     `partial` — совпадение, которое не продвинулось; `None` — новое совпадение не началось.
-    У трёх последних причин есть `scenario`, а `place` — `None`.
+    У отказов сценария есть `scenario`, а `place` — `None`.
     """
 
     reason: str
@@ -216,15 +220,28 @@ def later(a: Partial, b: Partial) -> bool:
 
 
 def dominates(a: Partial, b: Partial) -> bool:
-    """`a` вытесняет `b` из вершины: последний шаг у `a` не раньше, а произведение не меньше.
+    """`a` вытесняет `b` из вершины: время продолжения у `a` не раньше, при равном — последний
+    шаг не раньше, а произведение не меньше.
 
     Тогда любое продолжение `b` есть и у `a`, со сроком не раньше и уверенностью не ниже. Если
-    равны и последний шаг, и произведение, остаётся то, у кого шаги позже (`later`): так исход
-    не зависит от того, в каком порядке совпадения пришли в вершину.
+    равны и время, и последний шаг, и произведение, остаётся то, у кого шаги позже (`later`):
+    так исход не зависит от того, в каком порядке совпадения пришли в вершину. Время
+    продолжения растёт вместе с последним шагом; обгоняет его только копия, которой поправка
+    перенесла отсчёт.
     """
-    if (a.tail.step.position, a.product) == (b.tail.step.position, b.product):
-        return later(a, b)
-    return a.tail.step.position >= b.tail.step.position and a.product >= b.product
+    if a.last_time != b.last_time:
+        return a.last_time > b.last_time and a.product >= b.product
+    first, second = a.tail.step.position, b.tail.step.position
+    if first != second:
+        return first > second and a.product >= b.product
+    if a.product != b.product:
+        return a.product > b.product
+    return later(a, b)
+
+
+def mark(partial: Partial) -> tuple[float, int]:
+    """Порядок во фронте: время продолжения, при равном — последний шаг."""
+    return partial.last_time, partial.tail.step.position
 
 
 EMPTY: dict = {}  # переходы фронта набора `any`: их нет, словарь не заводится
@@ -233,14 +250,14 @@ EMPTY: dict = {}  # переходы фронта набора `any`: их не�
 class Front:
     """Несравнимые совпадения одного места: позиции бора или состояния набора `any`.
 
-    Совпадения идут по возрастанию последнего шага, а произведение score у них строго убывает:
-    более старое остаётся, только если оно увереннее (`dominates`). Время продолжения растёт
-    вместе с последним шагом: после тишины это срок окна, а у окон одного ребра длина одна.
-    Поэтому новое совпадение вытесняет только хвост, сроки истекают с головы, в задержку ребра
-    укладывается хвост, а самое уверенное в нём стоит первым.
+    Совпадения идут по возрастанию времени продолжения (`mark`), а произведение score у них
+    строго убывает: более старое остаётся, только если оно увереннее (`dominates`). Время
+    продолжения растёт вместе с последним шагом: после тишины это срок окна, а у окон одного
+    ребра длина одна. Поэтому новое совпадение вытесняет только хвост, сроки истекают с головы,
+    в задержку ребра укладывается хвост, а самое уверенное в нём стоит первым.
     """
 
-    __slots__ = ("place", "items", "head", "edges")
+    __slots__ = ("place", "items", "head", "edges", "queued")
 
     def __init__(self, place: "Cursor | tuple[Collector, int]") -> None:
         self.place = place
@@ -248,6 +265,8 @@ class Front:
         self.head = 0  # совпадения до `head` сняты по сроку
         # у позиции бора: токен перехода → переходы с ним; по этим токенам фронт стоит в индексе
         self.edges: dict[str, list[Edge]] = {} if isinstance(place, Cursor) else EMPTY
+        # есть запись в очереди сроков; поправка может опустошить фронт, а запись останется
+        self.queued = False
 
     def __len__(self) -> int:
         return len(self.items) - self.head
@@ -270,6 +289,28 @@ class Front:
         while len(items) > head and dominates(partial, items[-1]):
             items.pop()
         items.append(partial)
+        return len(items) - size
+
+    def insert(self, partial: Partial) -> int:
+        """Ставит совпадение на его место по `mark`; возвращает рост фронта.
+
+        Вытеснить новое может только первое совпадение не раньше него: у него наибольшее
+        произведение среди таких. Новое вытесняет совпадения сразу перед собой и равные ему по
+        `mark`.
+        """
+        items, head = self.items, self.head
+        key = mark(partial)
+        index = bisect_left(items, key, head, key=mark)
+        if index < len(items) and dominates(items[index], partial):
+            return 0
+        size = len(items)
+        end = index
+        while end < len(items) and mark(items[end]) == key and dominates(partial, items[end]):
+            end += 1
+        start = index
+        while start > head and dominates(partial, items[start - 1]):
+            start -= 1
+        items[start:end] = [partial]
         return len(items) - size
 
     def pop_first(self) -> Partial:
@@ -423,7 +464,9 @@ class Engine:
     - `add_scenario` дописывает пути в общий бор. Активные совпадения могут продолжаться по
       добавленным веткам; окна тишины открываются при входе в вершину после добавления.
 
-    Режим поправок (`self_correction` в правилах, CORRECTIONS.md):
+    Режим поправок (`self_correction` в правилах, CORRECTIONS.md). Маркер — фраза из
+    `corrections`, `negations` или `negation_breaks`: её токены идут в потоке подряд, у каждого
+    score не ниже `min_score` корня. Сценарии с `hold` 0 маркеры не трогают.
 
     - Срабатывание сценария с `hold` > 0 не выдаётся сразу, а ждёт: срок — момент завершения
       плюс `hold`. Срок продлевает новый шаг любого совпадения с тем же первым шагом: до
@@ -431,6 +474,10 @@ class Engine:
       `push` или `advance`; ждущие с одним сроком выдаются в один момент, раньше окон тишины
       с тем же сроком. Повтор и cooldown проверяются при завершении: ждущее срабатывание
       занимает токены и cooldown.
+    - Поправка снимает все ждущие срабатывания. Снятое освобождает токены и cooldown, как будто
+      его не было. Вместе с ним снимаются частичные совпадения и окна тишины, в которые входит
+      его последний токен, а копии его префикса отсчитывают задержку от поправки. Окна тишины
+      копий префикса не сдвигаются: окно мерит тишину, а не задержку.
     """
 
     def __init__(self, rules: RuleSet) -> None:
@@ -439,6 +486,21 @@ class Engine:
         # сценарий → задержка выдачи; без режима поправок у всех 0: срабатывание выдаётся сразу
         self._holds = {scenario.name: self._hold_of(scenario) for scenario in rules.scenarios}
         self._held: list[Hold] = []  # ждущие срабатывания в порядке завершения
+        # сценарий → момент завершения последнего выданного срабатывания: к нему возвращается
+        # cooldown, если поправка снимет ждущие
+        self._settled_at: dict[str, float] = {}
+        # фраза-маркер → что она делает; без режима поправок маркеров нет
+        self._phrases: dict[Phrase, str] = {}
+        if self._correcting:
+            for kind, phrases in (
+                ("correction", rules.corrections),
+                ("negation", rules.negations),
+                ("break", rules.negation_breaks),
+            ):
+                self._phrases.update(dict.fromkeys(phrases, kind))
+        self._lengths = sorted({len(phrase) for phrase in self._phrases})
+        # последние события: фраза ищется сравнением хвоста потока, её токены идут подряд
+        self._said: deque[Step] = deque(maxlen=max(self._lengths, default=1))
         # первые позиции совпадений, для которых событие стало шагом; None — вне режима поправок
         self._stepped: set[int] | None = None
         self._vocabulary = rules.vocabulary
@@ -682,12 +744,120 @@ class Engine:
             for hold in self._held:
                 if hold.partial.first_position in stepped:
                     hold.deadline = max(hold.deadline, event.time + hold.hold)
+        if self._phrases:
+            self._said.append(step)
+            heard = self._heard()
+            if "correction" in heard:
+                self._cancel(self._held, event.time, "corrected")
 
         self._recent.append(step)
         while self._recent and self._recent[0].event.time < event.time - self._lookback:
             self._recent.popleft()
         self._tick()
         return matches
+
+    def _heard(self) -> dict[str, list[int]]:
+        """Фразы-маркеры, которые кончаются последним событием: что делают → позиции токенов."""
+        said = list(self._said)
+        heard: dict[str, list[int]] = {}
+        for length in self._lengths:
+            if length > len(said):
+                break
+            tail = said[-length:]
+            kind = self._phrases.get(tuple(step.event.token for step in tail))
+            if kind is not None and all(
+                step.event.score >= self._defaults.min_score for step in tail
+            ):
+                heard.setdefault(kind, []).extend(step.position for step in tail)
+        return heard
+
+    def _cancel(self, holds: list[Hold], time: float, reason: str) -> None:
+        """Снимает ждущие срабатывания: токены и cooldown освобождаются, как будто их не было."""
+        if not holds:
+            return
+        gone = set(holds)
+        self._held = [hold for hold in self._held if hold not in gone]
+        for hold in holds:
+            self._taken[hold.scenario].difference_update(
+                step.position for step in hold.partial.backwards()
+            )
+            self._taken_count -= hold.partial.count
+            self._active_count -= 1
+            self._misses.append(Miss(reason, None, hold.partial, hold.scenario, hold.deadline, time))
+        self._kept = min(self._kept, self._taken_count)
+        for scenario in {hold.scenario for hold in holds}:
+            times = [hold.time for hold in self._held if hold.scenario == scenario]
+            if scenario in self._settled_at:
+                times.append(self._settled_at[scenario])
+            if times:
+                self._fired_at[scenario] = max(times)
+            else:
+                del self._fired_at[scenario]
+        self._withdraw([hold.partial for hold in holds], time, reason)
+
+    def _withdraw(self, partials: list[Partial], time: float, reason: str) -> None:
+        """Чистка после снятых срабатываний `partials` в момент `time`.
+
+        Совпадения и окна тишины, в которые входит последний токен снятого, снимаются: иначе
+        «открой шторы, ой, …, разогрей чайник» собрало бы «утро». Копии префикса снятого
+        отсчитывают задержку от `time`; чужие совпадения в тех же местах не меняются.
+        """
+        lasts = {partial.tail.step.position for partial in partials}
+        low = min(lasts)
+        prefixes: dict[int, set[tuple[int, ...]]] = {}  # первая позиция → префиксы снятых
+        for partial in partials:
+            positions = partial.positions()
+            prefixes.setdefault(partial.first_position, set()).update(
+                tuple(positions[:length]) for length in range(1, len(positions))
+            )
+
+        def shares(partial: Partial) -> bool:
+            steps = takewhile(lambda step: step.position >= low, partial.backwards())
+            return any(step.position in lasts for step in steps)
+
+        def copies(partial: Partial) -> bool:
+            own = prefixes.get(partial.first_position)
+            return own is not None and tuple(partial.positions()) in own
+
+        for front in (
+            *self._fronts.values(),
+            *(front for collector in self._collectors for front in collector.states.values()),
+        ):
+            self._rework(front, shares, copies, time, reason)
+        for timer in [timer for timer in self._hushes if shares(timer.payload.partial)]:
+            window, partial = timer.payload
+            self._wheel.cancel(timer)
+            self._unlist(timer)
+            self._misses.append(Miss(reason, window, partial, None, time, time))
+
+    def _rework(
+        self,
+        front: Front,
+        drop: Callable[[Partial], bool],
+        restart: Callable[[Partial], bool],
+        time: float,
+        reason: str,
+    ) -> None:
+        """Снимает из фронта совпадения `drop`, а совпадениям `restart` переносит отсчёт на
+        `time`. Опустевший фронт остаётся на месте до своей записи в очереди сроков."""
+        kept: list[Partial] = []
+        moved: list[Partial] = []
+        for partial in front:
+            if drop(partial):
+                place = front.place
+                if not isinstance(place, Cursor):
+                    place = place[0].place(place[1])
+                self._misses.append(Miss(reason, place, partial, None, time, time))
+            elif restart(partial) and partial.last_time < time:
+                moved.append(partial._replace(last_time=time))
+            else:
+                kept.append(partial)
+        if len(kept) == len(front):
+            return
+        self._active_count -= len(front) - len(kept)
+        front.items, front.head = kept, 0
+        for partial in moved:
+            self._active_count += front.insert(partial)
 
     def _move(self, time: float, what: str) -> None:
         if self._last_time is not None and time < self._last_time:
@@ -719,9 +889,8 @@ class Engine:
             front = collector.states.get(filled)
             if front is None:
                 front = collector.states[filled] = Front(place)
-        queued = len(front) > 0  # у непустого фронта уже есть срок в очереди
         self._active_count += front.add(partial)
-        if not queued:
+        if not front.queued:
             self._schedule(front)
 
     def _schedule(self, front: Front) -> None:
@@ -730,6 +899,7 @@ class Engine:
         gap = place.max_gap if isinstance(place, Cursor) else place[0].pattern.max_gap
         due = due_time(front.first().last_time, gap)
         heapq.heappush(self._deadlines, (due, next(self._order), front))
+        front.queued = True
 
     def _expire(self, event: Event, keys: tuple[str, ...]) -> None:
         """Снимает кандидатов, срок которых к событию истёк: во фронте это голова."""
@@ -738,6 +908,7 @@ class Engine:
         while self._deadlines and self._deadlines[0][0] <= now:
             due.append(heapq.heappop(self._deadlines)[2])
         for front in due:
+            front.queued = False
             place = front.place
             if isinstance(place, Cursor):
                 gap = place.max_gap
@@ -951,6 +1122,10 @@ class Engine:
             return []
         self._held = [hold for hold in self._held if not due(hold.deadline)]
         self._active_count -= len(ready)
+        for hold in ready:
+            self._settled_at[hold.scenario] = max(
+                self._settled_at.get(hold.scenario, hold.time), hold.time
+            )
         ready.sort(
             key=lambda hold: (
                 hold.deadline,
@@ -1052,6 +1227,8 @@ class Engine:
             self._held.append(Hold(scenario, best, time, hold))
             self._active_count += 1
             return None
+        if self._correcting:
+            self._settled_at[scenario] = time
         return Match(scenario, best.steps, best.confidence)
 
     def _hold_of(self, scenario: Scenario) -> float:
