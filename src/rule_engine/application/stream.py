@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable, Iterator
 
+from rule_engine.application.views import Frame
 from rule_engine.domain.engine import Event
 
 
@@ -33,3 +34,23 @@ def parse_stream(lines: Iterable[str]) -> Iterator[Event | float]:
             )
         token, score, time = parts
         yield Event(token, float(score), float(time))
+
+
+def check_token(token: str) -> None:
+    """Токен, который строка потока прочитает обратно тем же: живая сессия пишется в поток."""
+    if token.splitlines() != [token] or token != token.strip() or token.startswith("#"):
+        raise ValueError(
+            f"токен {token!r} не записать строкой потока: он пустой, с пробелами по краям, с "
+            "переводом строки или начинается с #"
+        )
+
+
+def stream_line(frame: Frame) -> str:
+    """Кадр строкой потока: событие — «токен уверенность время», ход таймера — метка времени.
+
+    Числа записываются точно (`repr`), поэтому `parse_stream` даст те же события и метки.
+    """
+    if frame.event is None:
+        return repr(frame.time)
+    event = frame.event
+    return f"{event.token} {event.score!r} {event.time!r}"

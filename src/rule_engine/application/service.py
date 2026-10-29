@@ -5,10 +5,13 @@
 
 import json
 import math
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from threading import Lock
+from time import monotonic
 from typing import NamedTuple
 
-from rule_engine.application.stream import parse_stream
+from rule_engine.application.ports import LiveListener
+from rule_engine.application.stream import check_token, parse_stream
 from rule_engine.application.views import (
     EventView,
     Frame,
@@ -23,8 +26,9 @@ from rule_engine.application.views import (
     TokenEdge,
     WaitingView,
 )
-from rule_engine.domain.engine import Engine, Match, Miss, Step, Waiting, Window
+from rule_engine.domain.engine import Engine, Held, Match, Miss, Step, Waiting, Window
 from rule_engine.domain.graph import Cursor, Edge, Node, Silence, Start
+from rule_engine.domain.live import LiveEngine, Update
 from rule_engine.domain.rules import RuleSet
 from rule_engine.domain.unordered import Unordered
 
@@ -67,6 +71,57 @@ class RuleEditor:
         self._document["vocabulary"].extend(sorted(self._engine.vocabulary - vocabulary))
 
 
+class LiveSession:
+    """Живой режим: токены приходят «сейчас», окна тишины закрывает таймер-поток движка, он же
+    в режиме поправок выдаёт ждущие срабатывания.
+
+    Время — секунды от начала сессии. `LiveEngine` отдаёт обновления вне блокировки, поэтому
+    обновление таймера может обогнать обновление события; сессия держит обогнавшее, пока не
+    уйдут предыдущие, и отдаёт кадры слушателю строго по номеру.
+    """
+
+    def __init__(self, rules: RuleSet, listener: LiveListener, clock: Callable[[], float]) -> None:
+        self._listener = listener
+        self._lock = Lock()  # кадры уходят слушателю по одному
+        self._next = 1  # номер обновления, которое уйдёт слушателю следующим
+        self._early: dict[int, Update] = {}  # обновления, обогнавшие предыдущие
+        start = clock()
+        self._engine = LiveEngine(rules, self._receive, lambda: clock() - start)
+        # обновлений ещё нет: окон нет, и токен не отправить, пока сессия не создана
+        self._graph, self._index = describe(self._engine, rules)
+
+    @property
+    def graph(self) -> GraphView:
+        return self._graph
+
+    def push(self, token: str, score: float) -> None:
+        """Событие «сейчас». Кадр приходит слушателю, а не возвращается отсюда."""
+        check_token(token)
+        self._engine.push_now(token, score)
+
+    def close(self) -> None:
+        """Останавливает таймер-поток: кадров больше не будет."""
+        self._engine.close()
+
+    def _receive(self, update: Update) -> None:
+        with self._lock:
+            self._early[update.number] = update
+            while self._next in self._early:
+                ready = self._early.pop(self._next)
+                self._next += 1
+                event = None if ready.step is None else event_view(ready.step)
+                frame = view_frame(
+                    self._index,
+                    ready.time,
+                    event,
+                    ready.matches,
+                    ready.waiting,
+                    ready.held,
+                    ready.misses,
+                )
+                self._listener.on_frame(frame)
+
+
 class RuleEngineService:
     def editor(self, rules_text: str) -> RuleEditor:
         return RuleEditor(rules_text)
@@ -81,6 +136,15 @@ class RuleEngineService:
         engine = Engine(rules)
         graph, index = describe(engine, rules)
         return Trace(graph, frames(engine, index, lines))
+
+    def live(
+        self,
+        rules_text: str,
+        listener: LiveListener,
+        clock: Callable[[], float] = monotonic,
+    ) -> LiveSession:
+        """Живая сессия: кадры после каждого токена и каждого хода таймера."""
+        return LiveSession(parse_rules(rules_text), listener, clock)
 
 
 def parse_rules(text: str) -> RuleSet:
@@ -112,6 +176,21 @@ def timer_frames(engine: Engine, index: Index, until: float) -> Iterator[Frame]:
 def frame(
     engine: Engine, index: Index, time: float, event: EventView | None, matches: list[Match]
 ) -> Frame:
+    return view_frame(
+        index, time, event, matches, engine.snapshot(), engine.held, engine.misses
+    )
+
+
+def view_frame(
+    index: Index,
+    time: float,
+    event: EventView | None,
+    matches: Iterable[Match],
+    waiting: Iterable[Waiting],
+    held: Iterable[Held],
+    misses: Iterable[Miss],
+) -> Frame:
+    """Кадр из того, что отдал движок: общий для прогона и живого режима."""
     return Frame(
         time,
         event,
@@ -124,7 +203,7 @@ def frame(
             )
             for match in matches
         ),
-        tuple(waiting_view(item, index) for item in engine.snapshot()),
+        tuple(waiting_view(item, index) for item in waiting),
         tuple(
             HeldView(
                 item.scenario,
@@ -133,13 +212,13 @@ def frame(
                 item.until,
                 item.frozen,
             )
-            for item in engine.held
+            for item in held
         ),
-        tuple(miss_view(miss, index) for miss in engine.misses),
+        tuple(miss_view(miss, index) for miss in misses),
     )
 
 
-def describe(engine: Engine, rules: RuleSet) -> tuple[GraphView, Index]:
+def describe(engine: Engine | LiveEngine, rules: RuleSet) -> tuple[GraphView, Index]:
     """Граф движка как view; вершины нумеруются в порядке обхода, как их печатает CLI."""
     nodes: dict[Cursor, int] = {}
 

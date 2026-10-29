@@ -1,4 +1,4 @@
-{# Части страницы, общие для графа и прогона. #}
+{# Части страницы, общие для графа, прогона и живого режима. #}
 
 {% macro svg(lay, state) %}
 {# граф сжимается до ширины панели, но не мельче 60 %: дальше — прокрутка #}
@@ -136,4 +136,21 @@
   </tbody>
 </table>
 {% endif %}
+{% endmacro %}
+
+{# кадр: событие или конец окна тишины, срабатывания, отказы, граф с состоянием, наборы, ожидание #}
+{% macro frame_view(graph, lay, paths, item, index, hidden) %}
+{% set state = paths.state(item) %}
+      <section class="frame" data-index="{{ index }}"{% if hidden %} hidden{% endif %}>
+        <h3>{{ title(item) }}</h3>
+        {% if item.matches %}
+        <ul class="fired">
+          {% for fired in item.matches %}<li>{{ match(fired) }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {{ misses(item, paths) }}
+        <div class="canvas">{{ svg(lay, state) }}</div>
+        {{ sets(graph, state, item) }}
+        {{ waiting(item, paths) }}
+      </section>
 {% endmacro %}

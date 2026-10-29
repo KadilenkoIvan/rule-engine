@@ -329,3 +329,34 @@ ul.fired li, .log li {
 .note.skip { color: var(--muted); }
 
 .panel.pending { opacity: 0.55; transition: opacity 0.15s; }
+
+.live-bar, .live-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.live-bar button.primary { align-self: auto; }
+.live-bar #live-status { flex: 1 1 220px; min-width: 0; }
+.live-clock { font: 600 14px var(--mono); }
+
+#live-token {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: var(--mono);
+}
+
+.live-score { display: flex; align-items: center; gap: 6px; }
+.live-score input { width: 120px; accent-color: var(--accent); }
+.live-score output { min-width: 2.6em; font: 12px var(--mono); }
+
+.live-tokens { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+.live-tokens button { padding: 2px 8px; font: 12px/1.6 var(--mono); }
+
+.player .follow { color: var(--accent); }

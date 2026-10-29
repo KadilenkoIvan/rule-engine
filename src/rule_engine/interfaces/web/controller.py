@@ -4,15 +4,17 @@
 """
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from time import monotonic
 from typing import NamedTuple
 from uuid import uuid4
 
-from rule_engine.application.service import RuleEditor, RuleEngineService
+from rule_engine.application.service import LiveSession, RuleEditor, RuleEngineService
+from rule_engine.application.stream import stream_line
 from rule_engine.application.views import Frame
-from rule_engine.interfaces.web.presenter import Presenter
+from rule_engine.interfaces.web.presenter import Board, Presenter
 
 HTML = "text/html"
 
@@ -29,6 +31,74 @@ def describe(error: ValueError | KeyError | TypeError) -> str:
     if isinstance(error, TypeError):
         return "Неверная структура сценария. Проверьте шаблоны и настройки."
     return str(error)
+
+
+def fields(message: object, *keys: str) -> list:
+    """Значения ключей сообщения живого режима; других ключей быть не может."""
+    if not isinstance(message, dict) or message.keys() != set(keys):
+        # у сообщения с правилами значение — весь JSON правил: в ошибке хватит ключей
+        got = f"ключи {sorted(message)}" if isinstance(message, dict) else repr(message)
+        raise ValueError(f"ожидается объект JSON с ключами {list(keys)}, получено: {got}")
+    return [message[key] for key in keys]
+
+
+class LiveChannel:
+    """Соединение живого режима: первое сообщение — правила, дальше токены.
+
+    Ответы и кадры уходят через `send` строками JSON с HTML внутри. `send` зовут из потока, который
+    принёс сообщение, и из таймер-потока движка; порядок кадров держит `LiveSession`.
+    """
+
+    def __init__(
+        self, service: RuleEngineService, presenter: Presenter, send: Callable[[str], None]
+    ) -> None:
+        self._service = service
+        self._presenter = presenter
+        self._send = send
+        self._session: LiveSession | None = None
+        self._board: Board | None = None
+        self._frames = 0  # номер следующего кадра: по нему строка ленты открывает свой кадр
+
+    def receive(self, text: str) -> None:
+        """Сообщение клиента. Ошибку входа отправляет клиенту, сессия при этом не меняется."""
+        try:
+            message = json.loads(text)
+            if self._session is None:
+                self._start(*fields(message, "rules"))
+            else:
+                self._push(*fields(message, "token", "score"))
+        except (ValueError, KeyError) as error:
+            self._reply({"type": "error", "message": describe(error)})
+
+    def on_frame(self, frame: Frame) -> None:
+        html, log = self._presenter.live_frame(self._board, frame, self._frames)
+        self._frames += 1
+        self._reply({"type": "frame", "html": html, "log": log, "line": stream_line(frame)})
+
+    def close(self) -> None:
+        """Соединение закрыто: таймер-поток сессии останавливается."""
+        if self._session is not None:
+            self._session.close()
+
+    def _start(self, rules: object) -> None:
+        if not isinstance(rules, str):
+            raise ValueError("правила должны быть строкой с JSON")
+        session = self._service.live(rules, self)
+        # кадров до первого токена нет, поэтому граф готов раньше, чем он понадобится `on_frame`
+        self._board = self._presenter.board(session.graph)
+        self._session = session
+        tokens, view = self._presenter.live_start(self._board)
+        self._reply({"type": "start", "tokens": tokens, "view": view})
+
+    def _push(self, token: object, score: object) -> None:
+        if not isinstance(token, str):
+            raise ValueError(f"токен должен быть строкой, получено {token!r}")
+        if isinstance(score, bool) or not isinstance(score, int | float):
+            raise ValueError(f"уверенность должна быть числом, получено {score!r}")
+        self._session.push(token, float(score))
+
+    def _reply(self, message: dict) -> None:
+        self._send(json.dumps(message, ensure_ascii=False))
 
 
 class WebController:
@@ -113,6 +183,10 @@ class WebController:
             body = json.dumps({"error": describe(error)}, ensure_ascii=False)
             return Reply(422, body, "application/json")
         return Reply(200, json.dumps(payload, ensure_ascii=False), "application/json")
+
+    def live(self, send: Callable[[str], None]) -> LiveChannel:
+        """Живая сессия на одно соединение: свой движок, свои часы и таймер."""
+        return LiveChannel(self._service, self._presenter, send)
 
     def trace(self, rules: str, stream: str) -> Reply:
         try:

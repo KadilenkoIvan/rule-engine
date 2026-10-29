@@ -4,10 +4,11 @@
 замена фреймворка — правка этого файла.
 """
 
+import asyncio
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
@@ -41,6 +42,31 @@ def create_app(controller: WebController, static: Path) -> FastAPI:
     @app.post("/trace")
     def trace(rules: str = Form(""), stream: str = Form("")) -> Response:
         return respond(controller.trace(rules, stream))
+
+    @app.websocket("/live")
+    async def live(socket: WebSocket) -> None:
+        await socket.accept()
+        loop = asyncio.get_running_loop()
+        outbox: asyncio.Queue[str] = asyncio.Queue()
+        # кадры приходят и из таймер-потока движка: в цикл событий — только так
+        channel = controller.live(lambda text: loop.call_soon_threadsafe(outbox.put_nowait, text))
+
+        async def deliver() -> None:
+            while True:
+                await socket.send_text(await outbox.get())
+
+        sender = asyncio.create_task(deliver())
+        try:
+            while True:
+                text = await socket.receive_text()
+                # движок ждёт свою блокировку и рисует кадр: цикл событий в это время свободен
+                await asyncio.to_thread(channel.receive, text)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await asyncio.to_thread(channel.close)
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
 
     return app
 

@@ -15,20 +15,7 @@
   <div class="columns">
     <div class="frames">
       {% for frame in frames %}
-      {% set state = paths.state(frame) %}
-      <section class="frame" data-index="{{ loop.index0 }}"{% if not loop.first %} hidden{% endif %}>
-        <h3>{{ m.title(frame) }}</h3>
-        {% if frame.matches %}
-        <ul class="fired">
-          {% for match in frame.matches %}<li>{{ m.match(match) }}</li>{% endfor %}
-        </ul>
-        {% endif %}
-        {{ m.misses(frame, paths) }}
-        <div class="canvas">{{ m.svg(lay, state) }}</div>
-        {{ m.sets(graph, state, frame) }}
-        {{ m.waiting(frame, paths) }}
-      </section>
-      {% endfor %}
+{{ m.frame_view(graph, lay, paths, frame, loop.index0, not loop.first) }}{% endfor %}
     </div>
     <aside class="log">
       <h4>Все срабатывания</h4>

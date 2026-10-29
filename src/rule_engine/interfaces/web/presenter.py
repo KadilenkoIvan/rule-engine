@@ -15,7 +15,7 @@ from rule_engine.application.views import (
     SilenceEdge,
     WaitingView,
 )
-from rule_engine.interfaces.web.svg import layout
+from rule_engine.interfaces.web.svg import Layout, layout
 
 TEMPLATES = Path(__file__).parent / "templates"
 
@@ -277,6 +277,14 @@ class Paths:
         return " → ".join(self.labels[item.place])
 
 
+class Board(NamedTuple):
+    """Граф живой сессии с раскладкой и путями: считаются один раз на сессию, а не на кадр."""
+
+    graph: GraphView
+    layout: Layout
+    paths: Paths
+
+
 class Presenter:
     def __init__(self) -> None:
         self._env = Environment(
@@ -291,6 +299,9 @@ class Presenter:
         self._env.globals["layout"] = layout
         self._env.globals["EMPTY"] = EMPTY
         self._env.globals["Paths"] = Paths
+        # макросы живого режима зовутся по одному: кадр приходит, когда его отдал движок
+        self._macros = self._env.get_template("macros.html").module
+        self._live = self._env.get_template("live.html").module
 
     def page(
         self,
@@ -320,3 +331,15 @@ class Presenter:
 
     def error(self, message: str) -> str:
         return self._env.get_template("error.html").render(message=message)
+
+    def board(self, graph: GraphView) -> Board:
+        return Board(graph, layout(graph), Paths(graph))
+
+    def live_start(self, board: Board) -> tuple[str, str]:
+        """Начало живой сессии: кнопки токенов словаря и плеер с графом без совпадений."""
+        return str(self._live.tokens(board.graph)), str(self._live.view(board.graph, board.layout))
+
+    def live_frame(self, board: Board, frame: Frame, index: int) -> tuple[str, str]:
+        """Кадр живой сессии и его строки для ленты срабатываний."""
+        html = self._macros.frame_view(board.graph, board.layout, board.paths, frame, index, False)
+        return str(html), str(self._live.log(frame, index))
