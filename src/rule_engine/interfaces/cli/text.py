@@ -64,7 +64,10 @@ def render(graph: GraphView) -> str:
 def format_match(match: MatchView, silence: float | None = None) -> str:
     """`✓ взлом, уверенность 0.85 — [<дверь> 0.90, 0.0 с] [<громкий звук> 0.80, 9.0 с]`:
     у шага — его токен, уверенность и время. `silence` — конец окна тишины, если сценарий
-    сработал по нему, без события."""
+    сработал по нему, без события. У отложенного срабатывания — срок, после которого оно
+    выдано."""
     steps = " ".join(f"[{step.token} {step.score:.2f}, {step.time} с]" for step in match.steps)
     line = f"✓ {match.scenario}, уверенность {match.confidence:.2f} — {steps}"
+    if match.released is not None:
+        return f"{line} — выдано в {match.released} с"
     return line if silence is None else f"{line} — тишина до {silence} с"

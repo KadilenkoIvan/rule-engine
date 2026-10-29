@@ -246,7 +246,7 @@ class Paths:
         position = frame.event.position
         used = any(
             step.position == position
-            for item in (*frame.waiting, *frame.matches)
+            for item in (*frame.waiting, *frame.held, *frame.matches)
             for step in item.steps
         )
         return Notes(

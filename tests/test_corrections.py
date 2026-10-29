@@ -2,7 +2,7 @@
 
 import pytest
 
-from rule_engine import RuleSet
+from rule_engine import Engine, Event, RuleSet
 
 MARKERS = {
     "corrections": [["ой"], ["а", "нет"]],
@@ -46,3 +46,45 @@ def test_flag_is_required_and_scenario_hold_is_checked(make_rules):
         })
     with pytest.raises(ValueError, match="hold"):
         corrected(make_rules, [{"name": "s", "hold": float("inf"), "patterns": [["a"]]}])
+
+
+def names(matches):
+    return [match.scenario for match in matches]
+
+
+def test_held_match_is_released_after_hold(make_rules):
+    engine = Engine(corrected(make_rules, [{"name": "pair", "patterns": [["a", "b"]]}]))
+    engine.push(Event("a", 0.9, 0.0))
+    assert engine.push(Event("b", 0.9, 0.5)) == []
+    assert [held.until for held in engine.held] == [1.5]
+    assert engine.next_deadline() == 1.5
+    assert engine.active_count == 2  # копия «a» и ждущее срабатывание
+    assert engine.advance(1.5) == []  # ровно на сроке ещё ждёт
+    [match] = engine.advance(1.6)
+    assert (match.scenario, match.released) == ("pair", 1.5)
+    assert engine.held == [] and engine.active_count == 1
+
+
+def test_relative_step_extends_hold_and_foreign_token_does_not(make_rules):
+    engine = Engine(corrected(make_rules, [
+        {"name": "ab", "patterns": [["a", "b"]]},
+        {"name": "ac", "patterns": [["a", "c"]]},
+    ]))
+    engine.push(Event("a", 0.9, 0.0))
+    engine.push(Event("b", 0.9, 0.5))
+    engine.push(Event("x", 0.9, 1.0))  # посторонний токен: срок прежний
+    assert [held.until for held in engine.held] == [1.5]
+    engine.push(Event("c", 0.9, 1.2))  # «a c» начато тем же «a»: шаг родственника
+    assert [(held.scenario, held.until) for held in engine.held] == [("ab", 2.2), ("ac", 2.2)]
+    assert names(engine.advance(3.0)) == ["ab", "ac"]
+
+
+def test_hold_zero_and_disabled_mode_emit_at_once(make_rules):
+    scenarios = [{"name": "alarm", "hold": 0.0, "patterns": [["a"]]},
+                 {"name": "pair", "patterns": [["b", "c"]]}]
+    engine = Engine(corrected(make_rules, scenarios))
+    assert names(engine.push(Event("a", 0.9, 0.0))) == ["alarm"]
+    off = Engine(corrected(make_rules, scenarios, self_correction=False))
+    off.push(Event("b", 0.9, 0.0))
+    assert names(off.push(Event("c", 0.9, 0.5))) == ["pair"]
+    assert off.held == []

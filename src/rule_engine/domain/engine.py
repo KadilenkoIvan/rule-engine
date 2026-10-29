@@ -62,6 +62,8 @@ class Match:
     scenario: str
     steps: tuple[Step, ...]  # шаги с токенами; шаги-тишины в срабатывание не входят
     confidence: float  # общая уверенность: среднее геометрическое score шагов
+    # режим поправок: срок, после которого выдано отложенное срабатывание; None — выдано сразу
+    released: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,27 @@ class Waiting(NamedTuple):
     place: Place
     partial: Partial
     until: float  # секунды: срок продолжения, а у окна тишины — её конец
+
+
+class Held(NamedTuple):
+    """Завершённое совпадение в режиме поправок: сценарий сработал, выдача ждёт срока."""
+
+    scenario: str
+    partial: Partial
+    until: float  # секунды: выдаётся, когда время станет больше
+
+
+class Hold:
+    """Ждущее срабатывание: срок продлевают новые шаги совпадений с тем же первым шагом."""
+
+    __slots__ = ("scenario", "partial", "time", "hold", "deadline")
+
+    def __init__(self, scenario: str, partial: Partial, time: float, hold: float) -> None:
+        self.scenario = scenario
+        self.partial = partial
+        self.time = time  # момент завершения: от него считался cooldown
+        self.hold = hold
+        self.deadline = time + hold
 
 
 class Miss(NamedTuple):
@@ -399,10 +422,25 @@ class Engine:
       обхода (tests/reference.py).
     - `add_scenario` дописывает пути в общий бор. Активные совпадения могут продолжаться по
       добавленным веткам; окна тишины открываются при входе в вершину после добавления.
+
+    Режим поправок (`self_correction` в правилах, CORRECTIONS.md):
+
+    - Срабатывание сценария с `hold` > 0 не выдаётся сразу, а ждёт: срок — момент завершения
+      плюс `hold`. Срок продлевает новый шаг любого совпадения с тем же первым шагом: до
+      времени этого шага плюс `hold`. Когда время станет больше срока, срабатывание выдают
+      `push` или `advance`; ждущие с одним сроком выдаются в один момент, раньше окон тишины
+      с тем же сроком. Повтор и cooldown проверяются при завершении: ждущее срабатывание
+      занимает токены и cooldown.
     """
 
     def __init__(self, rules: RuleSet) -> None:
         self._defaults = rules  # стандартные задержка и пороги не меняются
+        self._correcting = rules.self_correction  # режим поправок
+        # сценарий → задержка выдачи; без режима поправок у всех 0: срабатывание выдаётся сразу
+        self._holds = {scenario.name: self._hold_of(scenario) for scenario in rules.scenarios}
+        self._held: list[Hold] = []  # ждущие срабатывания в порядке завершения
+        # первые позиции совпадений, для которых событие стало шагом; None — вне режима поправок
+        self._stepped: set[int] | None = None
         self._vocabulary = rules.vocabulary
         self._cooldowns = {scenario.name: scenario.cooldown for scenario in rules.scenarios}
         # сценарий → номер объявления: срабатывания одного момента с одним началом идут так
@@ -432,7 +470,7 @@ class Engine:
         self._wheel: TimerWheel[Hush] = TimerWheel()  # сроки окон тишины
         self._hushes: dict[Timer[Hush], None] = {}  # открытые окна в порядке открытия
         self._windows: dict[str, dict[Timer[Hush], None]] = {}  # запрещённый токен → окна с ним
-        self._active_count = 0  # кандидаты во фронтах и открытые окна
+        self._active_count = 0  # кандидаты во фронтах, открытые окна и ждущие выдачи
         self._lookback = longest_before(self._starts)  # секунды: самое длинное окно назад
         self._recent: deque[Step] = deque()  # события не старше `_lookback`: для тишины до шага
         self._taken: dict[str, set[int]] = {}  # сценарий → позиции токенов его выданных срабатываний
@@ -499,6 +537,7 @@ class Engine:
             insert_unordered(self._unordered, self._unordered_owners, rules)
             self._add_collectors(self._unordered[known:])
         self._cooldowns[scenario.name] = scenario.cooldown
+        self._holds[scenario.name] = self._hold_of(scenario)
         self._declared[scenario.name] = len(self._declared)
         self._min_confidences[scenario.name] = rules.confidence_threshold(scenario)
         self._vocabulary = vocabulary
@@ -508,6 +547,11 @@ class Engine:
     def vocabulary(self) -> frozenset[str]:
         """Текущий словарь, включая токены успешно добавленных сценариев."""
         return self._vocabulary
+
+    @property
+    def held(self) -> list[Held]:
+        """Срабатывания, которые ждут выдачи (режим поправок), в порядке завершения."""
+        return [Held(hold.scenario, hold.partial, hold.deadline) for hold in self._held]
 
     @property
     def active_count(self) -> int:
@@ -557,8 +601,13 @@ class Engine:
         return waiting
 
     def next_deadline(self) -> float | None:
-        """Ближайший конец окна тишины: когда `advance` выдаст что-то без события. None — окон нет."""
-        return self._wheel.next_deadline()
+        """Ближайший конец окна тишины или срок ждущего срабатывания: когда `advance` выдаст
+        что-то без события. None — ждать нечего."""
+        deadline = self._wheel.next_deadline()
+        if self._held:
+            first = min(hold.deadline for hold in self._held)
+            deadline = first if deadline is None else min(deadline, first)
+        return deadline
 
     def feed(self, events: Iterable[Event]) -> list[Match]:
         matches: list[Match] = []
@@ -567,7 +616,8 @@ class Engine:
         return matches
 
     def advance(self, time: float) -> list[Match]:
-        """Двигает время без события: закрывает окна тишины со сроком раньше `time`."""
+        """Двигает время без события: закрывает окна тишины и выдаёт ждущие срабатывания со
+        сроком раньше `time`."""
         if not math.isfinite(time):
             raise ValueError(f"время {time} не конечное число")
         self._move(time, f"время {time}")
@@ -579,7 +629,8 @@ class Engine:
     def push(self, event: Event) -> list[Match]:
         self._move(event.time, f"время {event.time} токена {event.token!r}")
         misses = self._misses = []
-        matches = self._close(event.time)  # окна, истёкшие раньше события
+        matches = self._close(event.time)  # окна и ждущие, истёкшие раньше события
+        stepped = self._stepped = set() if self._correcting else None
         step = Step(self._position, event)
         self._position += 1
         # токены шагов, к которым подходит событие: по ним ищут в индексах
@@ -612,6 +663,8 @@ class Engine:
                 if event.score >= start.min_score:
                     # новое совпадение задержку не проверяет
                     self._enter(child, Partial.begin(step), completed, entries)
+                    if stepped is not None:
+                        stepped.add(step.position)
                 else:
                     misses.append(Miss("score", child, None, None, start.min_score, event.score))
         seen: set[Collector] = set()  # набор с шагами `<шаги>` и `any` стоит в индексе дважды
@@ -624,6 +677,11 @@ class Engine:
             self._store(place, partial)
         # срабатывания выдаются после обхода: из совпадений сценария выбирается самое уверенное
         matches += self._finish(completed, event.time)
+        if stepped:
+            # шаг родственника: совпадение с тем же первым шагом продолжает фразу
+            for hold in self._held:
+                if hold.partial.first_position in stepped:
+                    hold.deadline = max(hold.deadline, event.time + hold.hold)
 
         self._recent.append(step)
         while self._recent and self._recent[0].event.time < event.time - self._lookback:
@@ -745,6 +803,8 @@ class Engine:
             for partial in islice(items, fresh, None):
                 self._misses.append(Miss("score", child, partial, None, edge.min_score, event.score))
             return
+        if self._stepped is not None:
+            self._stepped.update(items[index].first_position for index in range(fresh, len(items)))
         if child.scenario is not None:
             completed.setdefault(child.scenario, []).extend(
                 items[index].extend(step) for index in range(fresh, len(items))
@@ -809,6 +869,8 @@ class Engine:
 
         def gather(target: int, items: list[Partial], start: int) -> None:
             """Продолжения `items[start:]` событием входят в состояние `target`."""
+            if self._stepped is not None:
+                self._stepped.update(items[index].first_position for index in range(start, len(items)))
             if target == collector.full:
                 completed.setdefault(pattern.scenario, []).extend(
                     items[index].extend(step) for index in range(start, len(items))
@@ -840,6 +902,8 @@ class Engine:
                 ]
         # начать набор может любой его шаг
         free, low = collector.closes(0, groups, event.score)
+        if free and self._stepped is not None:
+            self._stepped.add(step.position)
         for index in free:
             partial = Partial.begin(step)
             target = 1 << index
@@ -857,11 +921,17 @@ class Engine:
             self._misses.append(Miss("score", collector.place(0), None, None, need, event.score))
 
     def _close(self, now: float) -> list[Match]:
-        """Окна тишины со сроком раньше `now`: тишина выдержана, совпадение идёт за ребро."""
+        """Окна тишины со сроком раньше `now`: тишина выдержана, совпадение идёт за ребро.
+
+        Ждущие срабатывания выдаются по порядку сроков вперемешку с окнами: срабатывание,
+        которое завершило окно, может истечь до следующего окна.
+        """
         matches: list[Match] = []
         # окна с одним сроком закрываются в один момент, как совпадения одного события
         fired = self._wheel.advance(now)
         for deadline, timers in groupby(fired, key=lambda timer: timer.deadline):
+            if self._held:
+                matches += self._release(lambda due: due <= deadline)
             completed: dict[str, list[Partial]] = {}
             for timer in timers:
                 self._unlist(timer)
@@ -869,7 +939,29 @@ class Engine:
                 # после тишины не бывает тишины (rules.py), поэтому окна здесь не открываются
                 self._enter(window.child, partial._replace(last_time=deadline), completed, None)
             matches += self._finish(completed, deadline)
+        if self._held:
+            matches += self._release(lambda due: due < now)
         return matches
+
+    def _release(self, due: Callable[[float], bool]) -> list[Match]:
+        """Выдаёт ждущие срабатывания, срок которых прошёл (`due`): по срокам, один срок — один
+        момент, внутри момента — как у `_finish`."""
+        ready = [hold for hold in self._held if due(hold.deadline)]
+        if not ready:
+            return []
+        self._held = [hold for hold in self._held if not due(hold.deadline)]
+        self._active_count -= len(ready)
+        ready.sort(
+            key=lambda hold: (
+                hold.deadline,
+                hold.partial.first_position,
+                self._declared[hold.scenario],
+            )
+        )
+        return [
+            Match(hold.scenario, hold.partial.steps, hold.partial.confidence, hold.deadline)
+            for hold in ready
+        ]
 
     def _open(self, window: Window, partial: Partial) -> None:
         """Открывает окно тишины, если запрещённого токена не было и `before` секунд до шага."""
@@ -955,7 +1047,15 @@ class Engine:
         taken.update(step.position for step in best.backwards())
         self._taken_count += best.count  # позиции новые: проверено выше
         self._fired_at[scenario] = time
+        hold = self._holds[scenario]
+        if hold > 0:
+            self._held.append(Hold(scenario, best, time, hold))
+            self._active_count += 1
+            return None
         return Match(scenario, best.steps, best.confidence)
+
+    def _hold_of(self, scenario: Scenario) -> float:
+        return self._defaults.hold_of(scenario) if self._correcting else 0.0
 
     def _tick(self) -> None:
         """Чистит `_taken`, когда с прошлой чистки прошло не меньше вызовов, чем кандидатов и
@@ -986,6 +1086,8 @@ class Engine:
             (
                 *(partial.first_position for front in fronts for partial in front),
                 *(timer.payload.partial.first_position for timer in self._hushes),
+                # позиции ждущего освобождаются, если поправка его снимет
+                *(hold.partial.first_position for hold in self._held),
             ),
             default=self._position,
         )

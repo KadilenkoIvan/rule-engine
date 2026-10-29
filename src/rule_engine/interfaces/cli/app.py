@@ -28,12 +28,14 @@ class CliInterface:
             print(render(self._service.graph(rules)))
             return 0
 
-        waiting = 0  # пустой поток: ждать нечему
+        waiting = held = 0  # пустой поток: ждать нечему
         with args.stream.open(encoding="utf-8") as lines:
             for frame in self._service.trace(rules, lines).frames:
                 for match in frame.matches:
-                    # кадр без события — конец окна тишины
+                    # кадр без события — конец окна тишины или срок выдачи
                     print(format_match(match, frame.time if frame.event is None else None))
-                waiting = len(frame.waiting)
+                waiting, held = len(frame.waiting), len(frame.held)
         print(f"незавершённых совпадений в конце потока: {waiting}")
+        if held:
+            print(f"ждут выдачи: {held}")
         return 0

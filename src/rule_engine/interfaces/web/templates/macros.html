@@ -60,12 +60,14 @@
 {% endmacro %}
 
 {% macro match(item) %}
-<span class="ok">✓</span> <strong>{{ item.scenario }}</strong> <span class="muted">{{ item.confidence|score }}</span>
+<span class="ok">✓</span> <strong>{{ item.scenario }}</strong> <span class="muted">{{ item.confidence|score }}{% if item.released is not none %}, выдано после срока {{ item.released|g }}{% endif %}</span>
 <div class="steps">{{ steps(item.steps) }}</div>
 {% endmacro %}
 
 {% macro title(frame) %}
-{% if frame.event is none %}
+{% if frame.event is none and frame.matches and frame.matches|selectattr("released", "none")|list|length == 0 %}
+⏱ <span class="muted">без события: срок выдачи кончился @ {{ frame.time|g }}</span>
+{% elif frame.event is none %}
 ⏱ <span class="muted">без события: окно тишины кончилось @ {{ frame.time|g }}</span>
 {% else %}
 <span class="muted">#{{ frame.event.position }}</span> {{ frame.event.token }}
@@ -118,5 +120,20 @@
 </table>
 {% else %}
 <p class="muted">Частичных совпадений нет.</p>
+{% endif %}
+{% if frame.held %}
+<table class="waiting held">
+  <thead><tr><th>Ждёт выдачи</th><th>Шаги</th><th>Уверенность</th><th>Срок</th></tr></thead>
+  <tbody>
+    {% for item in frame.held %}
+    <tr>
+      <td>{{ item.scenario }}</td>
+      <td>{{ steps(item.steps) }}</td>
+      <td>{{ item.confidence|score }}</td>
+      <td>после {{ item.until|g }} <span class="muted">ещё {{ "%.1f"|format(item.until - frame.time) }} с</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endif %}
 {% endmacro %}
