@@ -1,1 +1,1 @@
-"""Сценарии использования: всё, что интерфейсы делают с движком, и view-модели для них."""
+"""Use cases: everything interfaces do with the engine, and view models for them."""

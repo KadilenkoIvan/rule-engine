@@ -1,12 +1,8 @@
-"""Иерархическое колесо таймеров: сроки окон тишины (Р16 в PLAN.md).
+"""Hierarchical timer wheel for silence window deadlines.
 
-Уровень 0 — `size` ячеек по `tick` секунд, ячейка каждого следующего уровня в `size` раз шире.
-Уровень создаётся, когда срок не помещается в уже созданные. Номера тиков — целые: у таймера
-k = ⌊deadline / tick⌋, у текущего времени c = ⌊now / tick⌋, на уровне L номер ячейки —
-k // size^L. Целочисленное деление не даёт уровням разойтись из-за округления float.
-
-Колесо только раскладывает таймеры по ячейкам. Сработал ли таймер, решает точное сравнение
-`deadline < now`: ячейка шириной `tick`, а сроки — float.
+Level 0 has `size` cells of `tick` seconds, each next level is `size` times wider. Tick numbers
+are integers (k = ⌊deadline / tick⌋, cell k // size^L on level L), so levels never drift apart
+by float rounding. Whether a timer fired is decided by the exact `deadline < now`.
 """
 
 import math
@@ -21,7 +17,7 @@ SIZE = 64  # ячеек на уровне
 
 @dataclass(eq=False)
 class Timer(Generic[T]):
-    """Изменяемый и сравнивается по identity: его отменяют по ссылке."""
+    """Scheduled timer; mutable and compared by identity: it is cancelled by reference."""
 
     deadline: float  # секунды: таймер срабатывает, когда время станет больше
     payload: T
@@ -31,7 +27,7 @@ class Timer(Generic[T]):
 
 
 class TimerWheel(Generic[T]):
-    """Вставка и отмена — O(уровней); `advance` разбирает не больше `size` ячеек на уровень."""
+    """Insert and cancel are O(levels); `advance` drains at most `size` cells per level."""
 
     def __init__(self, tick: float = TICK, size: int = SIZE) -> None:
         if not (math.isfinite(tick) and tick > 0):
@@ -48,12 +44,18 @@ class TimerWheel(Generic[T]):
 
     @property
     def now(self) -> float | None:
+        """Wheel time; None before the first `advance`."""
         return self._now
 
     def __len__(self) -> int:
         return self._count
 
     def schedule(self, deadline: float, payload: T) -> Timer[T]:
+        """Schedules a timer.
+
+        Raises:
+            ValueError: no time yet, or `deadline` is not finite or not later than now.
+        """
         if self._now is None:
             raise ValueError("время колеса не задано: сначала вызовите advance")
         if not math.isfinite(deadline):
@@ -67,7 +69,11 @@ class TimerWheel(Generic[T]):
         return timer
 
     def cancel(self, timer: Timer[T]) -> None:
-        """Ставит флаг; из ячейки таймер выбрасывается, когда до неё дойдёт разбор."""
+        """Marks the timer cancelled; its cell drops it when drained.
+
+        Raises:
+            ValueError: the timer is already cancelled or fired.
+        """
         if timer.cancelled:
             raise ValueError(f"таймер со сроком {timer.deadline} уже отменён")
         if timer.fired:
@@ -76,9 +82,13 @@ class TimerWheel(Generic[T]):
         self._count -= 1
 
     def advance(self, now: float) -> list[Timer[T]]:
-        """Двигает время; возвращает сработавшие таймеры (`deadline < now`) по сроку и постановке.
+        """Moves time; the first call only sets the start time.
 
-        Первый вызов только задаёт начальное время.
+        Returns:
+            Fired timers (`deadline < now`) by deadline, then by scheduling order.
+
+        Raises:
+            ValueError: `now` is not finite or earlier than the wheel time.
         """
         if not math.isfinite(now):
             raise ValueError(f"время {now} не конечное число")
@@ -104,10 +114,10 @@ class TimerWheel(Generic[T]):
         return due
 
     def next_deadline(self) -> float | None:
-        """Ближайший срок ждущего таймера.
+        """Nearest deadline of a pending timer; None if there is none.
 
-        На каждом уровне берётся первая непустая ячейка, затем наименьший срок по уровням: таймер,
-        давно поставленный на старший уровень, может истечь раньше свежего таймера уровня 0.
+        The first non-empty cell of every level counts: an old timer on a higher level may be
+        due before a fresh timer of level 0.
         """
         best: float | None = None
         for level, slots in enumerate(self._levels):
@@ -125,10 +135,11 @@ class TimerWheel(Generic[T]):
         return best
 
     def _index(self, time: float) -> int:
+        """Tick number of `time` on level 0."""
         return math.floor(time / self._width)
 
     def _insert(self, timer: Timer[T]) -> None:
-        """На самый нижний уровень, где номер ячейки меньше чем на `size` впереди текущего."""
+        """Puts the timer on the lowest level where its cell is less than `size` ahead."""
         k = self._index(timer.deadline)
         level = 0
         while k // self._size**level - self._tick // self._size**level >= self._size:
@@ -138,7 +149,7 @@ class TimerWheel(Generic[T]):
         self._levels[level][k // self._size**level % self._size].append(timer)
 
     def _place(self, timer: Timer[T], due: list[Timer[T]]) -> None:
-        """Таймер из разобранной ячейки: отменён — выбросить, срок прошёл — сработал, иначе ниже."""
+        """Timer of a drained cell: dropped if cancelled, fired if due, else moved down."""
         if timer.cancelled:
             return
         if timer.deadline < self._now:
@@ -147,7 +158,7 @@ class TimerWheel(Generic[T]):
             self._insert(timer)
 
     def _drain(self, level: int, first: int, last: int, due: list[Timer[T]]) -> None:
-        """Разбирает ячейки уровня с номерами first..last, но каждую не больше одного раза."""
+        """Drains cells first..last of the level, each at most once."""
         slots = self._levels[level]
         for k in range(first, first + min(last - first + 1, self._size)):
             index = k % self._size

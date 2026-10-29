@@ -1,4 +1,4 @@
-"""Живой режим: движок со своими часами и таймер-потоком для окон тишины (Р9, Р13 в PLAN.md)."""
+"""Live mode: an engine with its own clock and a timer thread that moves time to deadlines."""
 
 import threading
 import time
@@ -12,7 +12,7 @@ from rule_engine.domain.unordered import Unordered
 
 
 class Update(NamedTuple):
-    """Что стало после события или хода таймера. Снимок взят под той же блокировкой."""
+    """State after an event or a timer move, taken under the same lock."""
 
     # порядковый номер: `on_update` зовётся вне блокировки, и два обновления из разных потоков
     # могут прийти получателю не по порядку
@@ -26,19 +26,17 @@ class Update(NamedTuple):
 
 
 class LiveEngine:
-    """`Engine` с часами: время событий ставит сам, окна тишины закрывает таймер-поток.
+    """`Engine` with a clock: it stamps event times, a timer thread calls `advance`.
 
-    - Время события берётся из `clock` под блокировкой. Если брать его до блокировки, таймер
-      успеет сдвинуть время вперёд, и событие окажется в прошлом.
-    - `clock` по умолчанию — `time.monotonic`: он не идёт назад, а время движка не убывает. Время
-      в живом режиме нужно только для сроков, поэтому шкала — своя, не Unix time.
-    - Таймер-поток спит до `next_deadline()` (конец окна тишины или срок выдачи в режиме
-      поправок) и вызывает `advance`. Сроков нет — спит, пока его не
-      разбудят. Событие будит его: оно могло открыть окно с более ранним сроком.
-    - `on_update` зовётся вне блокировки: из потока, вызвавшего `push_now`, или из таймер-потока.
-      Медленный обработчик не держит движок. Порядок восстанавливается по `Update.number`.
-      Исключение в обработчике хода таймера останавливает таймер-поток.
-    - Ход таймера отдаётся и без срабатываний: окно закрылось, снимок поменялся.
+    The event time is read under the lock, otherwise the timer could move time past it. The
+    timer thread sleeps until `next_deadline()`; an event wakes it. `on_update` is called
+    outside the lock, from the pushing thread or the timer thread, so updates may arrive out
+    of order: `Update.number` restores it. An exception in a timer update stops the thread.
+
+    Args:
+        rules: the rules.
+        on_update: receives every update, timer moves without matches included.
+        clock: seconds; must not go back.
     """
 
     def __init__(
@@ -58,18 +56,28 @@ class LiveEngine:
 
     @property
     def starts(self) -> dict[Start, Node]:
+        """Root edges of the engine's trie."""
         return self._engine.starts
 
     @property
     def unordered(self) -> list[Unordered]:
+        """`any` patterns of the engine."""
         return self._engine.unordered
 
     @property
     def vocabulary(self) -> frozenset[str]:
+        """Current vocabulary of the engine."""
         return self._engine.vocabulary
 
     def push_now(self, token: str, score: float) -> Update:
-        """Событие «сейчас». Возвращает то же обновление, что получает `on_update`."""
+        """Pushes an event at the current clock time.
+
+        Returns:
+            The same update `on_update` receives.
+
+        Raises:
+            ValueError: the engine is closed.
+        """
         with self._wake:
             if self._closed:
                 raise ValueError("движок закрыт")
@@ -81,13 +89,14 @@ class LiveEngine:
         return update
 
     def close(self) -> None:
-        """Останавливает таймер-поток. Открытые окна тишины не закрываются."""
+        """Stops the timer thread; open silence windows are not closed."""
         with self._wake:
             self._closed = True
             self._wake.notify()
         self._thread.join()
 
     def _run(self) -> None:
+        """Timer thread: sleeps until the next deadline and moves the engine time past it."""
         while True:
             with self._wake:
                 while True:
@@ -104,6 +113,7 @@ class LiveEngine:
             self._on_update(update)
 
     def _update(self, time: float, step: Step | None, matches: list[Match]) -> Update:
+        """Numbered update with the engine state; called under the lock."""
         self._number += 1
         return Update(
             self._number,

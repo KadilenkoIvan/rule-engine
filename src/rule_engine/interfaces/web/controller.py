@@ -1,6 +1,6 @@
-"""Контроллер веба: строки на входе, `Reply` на выходе. О фреймворке не знает.
+"""Web controller: strings in, `Reply` out; it knows nothing of the framework.
 
-Ошибку правил или потока показывает пользователю: это ответ на неверный вход, а не обход.
+Errors in rules or streams are shown to the user: they answer invalid input.
 """
 
 import json
@@ -20,12 +20,15 @@ HTML = "text/html"
 
 
 class Reply(NamedTuple):
+    """Controller answer: HTTP status, body and media type."""
+
     status: int
     body: str
     media_type: str
 
 
 def describe(error: ValueError | KeyError | TypeError) -> str:
+    """Error message for the user."""
     if isinstance(error, KeyError):
         return f"в JSON нет ключа {error}"
     if isinstance(error, TypeError):
@@ -34,7 +37,11 @@ def describe(error: ValueError | KeyError | TypeError) -> str:
 
 
 def fields(message: object, *keys: str) -> list:
-    """Значения ключей сообщения живого режима; других ключей быть не может."""
+    """Values of the keys of a live mode message.
+
+    Raises:
+        ValueError: the message is not an object with exactly these keys.
+    """
     if not isinstance(message, dict) or message.keys() != set(keys):
         # у сообщения с правилами значение — весь JSON правил: в ошибке хватит ключей
         got = f"ключи {sorted(message)}" if isinstance(message, dict) else repr(message)
@@ -42,11 +49,17 @@ def fields(message: object, *keys: str) -> list:
     return [message[key] for key in keys]
 
 
-class LiveChannel:
-    """Соединение живого режима: первое сообщение — правила, дальше токены.
+def _first_text(files: dict[str, Path]) -> str:
+    """Text of the first file; empty if there are none."""
+    path = next(iter(files.values()), None)
+    return "" if path is None else path.read_text(encoding="utf-8")
 
-    Ответы и кадры уходят через `send` строками JSON с HTML внутри. `send` зовут из потока, который
-    принёс сообщение, и из таймер-потока движка; порядок кадров держит `LiveSession`.
+
+class LiveChannel:
+    """Live mode connection: the first message is the rules, then tokens.
+
+    Replies and frames go out through `send` as JSON strings with HTML inside. `send` is called
+    from the receiving thread and from the engine's timer thread; `LiveSession` keeps the order.
     """
 
     def __init__(
@@ -60,7 +73,7 @@ class LiveChannel:
         self._frames = 0  # номер следующего кадра: по нему строка ленты открывает свой кадр
 
     def receive(self, text: str) -> None:
-        """Сообщение клиента. Ошибку входа отправляет клиенту, сессия при этом не меняется."""
+        """Client message; an input error goes back to the client, the session stays."""
         try:
             message = json.loads(text)
             if self._session is None:
@@ -71,16 +84,18 @@ class LiveChannel:
             self._reply({"type": "error", "message": describe(error)})
 
     def on_frame(self, frame: Frame) -> None:
+        """Sends a frame of the live session."""
         html, log = self._presenter.live_frame(self._board, frame, self._frames)
         self._frames += 1
         self._reply({"type": "frame", "html": html, "log": log, "line": stream_line(frame)})
 
     def close(self) -> None:
-        """Соединение закрыто: таймер-поток сессии останавливается."""
+        """The connection closed: stops the session's timer thread."""
         if self._session is not None:
             self._session.close()
 
     def _start(self, rules: object) -> None:
+        """Starts the session with the rules and sends the token buttons and the empty graph."""
         if not isinstance(rules, str):
             raise ValueError("правила должны быть строкой с JSON")
         session = self._service.live(rules, self)
@@ -91,6 +106,7 @@ class LiveChannel:
         self._reply({"type": "start", "tokens": tokens, "view": view})
 
     def _push(self, token: object, score: object) -> None:
+        """Pushes a token of the client; its frame comes through `on_frame`."""
         if not isinstance(token, str):
             raise ValueError(f"токен должен быть строкой, получено {token!r}")
         if isinstance(score, bool) or not isinstance(score, int | float):
@@ -98,10 +114,13 @@ class LiveChannel:
         self._session.push(token, float(score))
 
     def _reply(self, message: dict) -> None:
+        """Sends a message as JSON."""
         self._send(json.dumps(message, ensure_ascii=False))
 
 
 class WebController:
+    """Pages, examples, graphs, stream runs and live sessions of the web interface."""
+
     def __init__(self, service: RuleEngineService, presenter: Presenter, examples: Path) -> None:
         self._service = service
         self._presenter = presenter
@@ -110,12 +129,17 @@ class WebController:
         self._editor_lock = Lock()
 
     def _expire_editors(self, now: float) -> None:
+        """Drops editing sessions idle for an hour."""
         for session, (touched, _) in list(self._editors.items()):
             if now - touched >= 3600:
                 del self._editors[session]
 
     def _editor(self, session: str) -> RuleEditor | None:
-        """Вызывается под блокировкой; вкладки имеют независимые сессии редактирования."""
+        """Editor of the session; call under the lock. Each tab has its own session.
+
+        Raises:
+            ValueError: the session expired.
+        """
         now = monotonic()
         self._expire_editors(now)
         if session not in self._editors:
@@ -125,39 +149,45 @@ class WebController:
         return editor
 
     def _files(self, pattern: str) -> dict[str, Path]:
+        """Example files matching `pattern`, by name in alphabetical order."""
         return {path.name: path for path in sorted(self._examples.glob(pattern))}
 
     def index(self) -> Reply:
+        """Main page with the first examples open and a new editing session."""
         rules_files, stream_files = self._files("*.json"), self._files("*.txt")
         # на странице сразу открыты первые примеры; если их нет, поля пустые
-        rules = next(iter(rules_files.values()), None)
-        stream = next(iter(stream_files.values()), None)
-        rules_text = "" if rules is None else rules.read_text(encoding="utf-8")
-        stream_text = "" if stream is None else stream.read_text(encoding="utf-8")
+        rules_text = _first_text(rules_files)
+        stream_text = _first_text(stream_files)
         graph, error, editor = None, None, None
         try:
             editor = self._service.editor(rules_text)
             graph = editor.graph()
         except (ValueError, KeyError) as caught:
             error = describe(caught)
-        session = uuid4().hex
-        with self._editor_lock:
-            now = monotonic()
-            self._expire_editors(now)
-            self._editors[session] = (now, editor)
+        session = self._open_session(editor)
         body = self._presenter.page(
             list(rules_files), list(stream_files), rules_text, stream_text, graph, error, session
         )
         return Reply(200, body, HTML)
 
     def example(self, name: str) -> Reply:
-        """Текст примера по имени файла. Имя ищется среди файлов папки, путь из запроса не строится."""
+        """Text of an example by file name; the name is looked up, no path is built from it."""
         path = {**self._files("*.json"), **self._files("*.txt")}.get(name)
         if path is None:
             return Reply(404, f"примера {name!r} нет", "text/plain")
         return Reply(200, path.read_text(encoding="utf-8"), "text/plain")
 
+    def _open_session(self, editor: RuleEditor | None) -> str:
+        """New editing session with `editor`; returns its id."""
+        session = uuid4().hex
+        with self._editor_lock:
+            now = monotonic()
+            self._expire_editors(now)
+            self._editors[session] = (now, editor)
+        return session
+
     def graph(self, rules: str, session: str) -> Reply:
+        """Graph of the rules; they become the session's rules."""
         try:
             with self._editor_lock:
                 self._editor(session)
@@ -169,6 +199,7 @@ class WebController:
         return Reply(200, self._presenter.graph(graph), HTML)
 
     def add_scenario(self, session: str, scenario: str) -> Reply:
+        """Adds a scenario to the session's rules; replies with the rules and the graph."""
         try:
             with self._editor_lock:
                 editor = self._editor(session)
@@ -185,10 +216,11 @@ class WebController:
         return Reply(200, json.dumps(payload, ensure_ascii=False), "application/json")
 
     def live(self, send: Callable[[str], None]) -> LiveChannel:
-        """Живая сессия на одно соединение: свой движок, свои часы и таймер."""
+        """Live session of one connection: its own engine, clock and timer."""
         return LiveChannel(self._service, self._presenter, send)
 
     def trace(self, rules: str, stream: str) -> Reply:
+        """Stream run; frames before an error in the stream are shown too."""
         try:
             trace = self._service.trace(rules, stream.splitlines())
         except (ValueError, KeyError) as error:

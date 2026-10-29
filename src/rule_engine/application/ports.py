@@ -1,4 +1,4 @@
-"""Порты: что сценарии использования ждут от интерфейса."""
+"""Ports: what the use cases expect from an interface."""
 
 from typing import Protocol
 
@@ -6,10 +6,12 @@ from rule_engine.application.views import Frame
 
 
 class LiveListener(Protocol):
-    def on_frame(self, frame: Frame) -> None:
-        """Кадр живой сессии: после события или хода таймера.
+    """Receiver of live session frames."""
 
-        Зовётся из потока, отправившего токен, или из таймер-потока движка, но всегда по одному
-        и строго по порядку кадров. Пока он работает, следующий кадр ждёт.
+    def on_frame(self, frame: Frame) -> None:
+        """Frame of a live session: after an event or a timer move.
+
+        Called from the pushing thread or the engine's timer thread, but one at a time and
+        strictly in frame order: the next frame waits while it runs.
         """
         ...

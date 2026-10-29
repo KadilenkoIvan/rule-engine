@@ -1,4 +1,4 @@
-"""Словарь токенов и сценарии: исходные данные, из которых строится граф."""
+"""Token vocabulary and scenarios: the source data the graph is built from."""
 
 import json
 import math
@@ -25,7 +25,7 @@ WILDCARDS = frozenset({ANY, ANY_VOCABULARY})  # в словаре их быть 
 
 @dataclass(frozen=True)
 class PatternStep:
-    """Шаг шаблона. Не путать со `Step` из engine.py: тот — событие потока внутри совпадения."""
+    """Pattern step. Not to be confused with `Step` of engine.py: a stream event in a match."""
 
     token: str
     max_gap: float | None  # секунды от предыдущего шага; None — задержка сценария или корня
@@ -34,10 +34,10 @@ class PatternStep:
 
 @dataclass(frozen=True)
 class SilenceStep:
-    """Шаг-тишина: ни одного токена из `absent` со score не ниже порога за `duration` секунд.
+    """Silence step: no token of `absent` at or above the threshold for `duration` seconds.
 
-    Окно отсчитывается от предыдущего шага: `duration` секунд вперёд и `before` секунд назад.
-    Бывает только в `sequence`, не первым и не сразу после другой тишины.
+    The window counts from the previous step: `duration` seconds forward, `before` back. It
+    occurs only in `sequence`, never first and never right after another silence.
     """
 
     absent: tuple[str, ...]  # запрещённые токены; `any` и `any_vac` — любой и любой из словаря
@@ -48,6 +48,8 @@ class SilenceStep:
 
 @dataclass(frozen=True)
 class Scenario:
+    """Named set of alternative patterns: any of them fires the scenario."""
+
     name: str
     # альтернативы: сработал любой шаблон — сработал сценарий
     patterns: tuple[tuple[PatternStep | SilenceStep, ...], ...]
@@ -64,6 +66,12 @@ Phrase = tuple[str, ...]  # маркер: токены, которые идут 
 
 @dataclass(frozen=True)
 class RuleSet:
+    """Validated rules: vocabulary, scenarios and root defaults.
+
+    Raises:
+        ValueError: on construction, if a setting or a pattern is invalid.
+    """
+
     vocabulary: frozenset[str]
     scenarios: tuple[Scenario, ...]
     max_gap: float  # секунды между шагами, если задержку не задали ни шаг, ни сценарий
@@ -77,6 +85,16 @@ class RuleSet:
     negation_breaks: tuple[Phrase, ...]  # «а», «но»: закрывают отрицание
 
     def __post_init__(self) -> None:
+        self._check_root()
+        names: set[str] = set()
+        for scenario in self.scenarios:
+            if scenario.name in names:
+                raise ValueError(f"сценарий {scenario.name!r} объявлен дважды")
+            names.add(scenario.name)
+            self._check_scenario(scenario)
+
+    def _check_root(self) -> None:
+        """Checks the vocabulary, the root defaults and the marker phrases."""
         reserved = sorted(self.vocabulary & WILDCARDS)
         if reserved:
             raise ValueError(
@@ -94,95 +112,88 @@ class RuleSet:
         if not non_negative_finite(self.hold):
             raise ValueError(f"hold {self.hold} должен быть неотрицательным конечным числом")
         check_markers(self)
-        names: set[str] = set()
-        for scenario in self.scenarios:
-            if scenario.name in names:
-                raise ValueError(f"сценарий {scenario.name!r} объявлен дважды")
-            names.add(scenario.name)
-            if scenario.max_gap is not None and not positive_finite(scenario.max_gap):
+
+    def _check_scenario(self, scenario: Scenario) -> None:
+        """Checks the scenario settings and its patterns."""
+        if scenario.max_gap is not None and not positive_finite(scenario.max_gap):
+            raise ValueError(
+                f"сценарий {scenario.name!r}: max_gap {scenario.max_gap} должен быть "
+                "положительным конечным числом"
+            )
+        if scenario.min_score is not None and not unit_interval(scenario.min_score):
+            raise ValueError(
+                f"сценарий {scenario.name!r}: min_score {scenario.min_score} должен быть в [0, 1]"
+            )
+        if scenario.min_confidence is not None and not unit_interval(scenario.min_confidence):
+            raise ValueError(
+                f"сценарий {scenario.name!r}: min_confidence {scenario.min_confidence} должен "
+                "быть в [0, 1]"
+            )
+        if scenario.hold is not None and not non_negative_finite(scenario.hold):
+            raise ValueError(
+                f"сценарий {scenario.name!r}: hold {scenario.hold} должен быть "
+                "неотрицательным конечным числом"
+            )
+        if scenario.order not in ORDERS:
+            raise ValueError(
+                f"сценарий {scenario.name!r}: order {scenario.order!r} должен быть "
+                '"sequence" или "any"'
+            )
+        if not scenario.patterns:
+            raise ValueError(f"сценарий {scenario.name!r} не содержит шаблонов")
+        patterns: set[tuple[tuple[str, float, float], ...]] = set()
+        for pattern in scenario.patterns:
+            self._check_pattern(scenario, pattern, patterns)
+        if not (math.isfinite(scenario.cooldown) and scenario.cooldown >= 0):
+            raise ValueError(
+                f"сценарий {scenario.name!r}: cooldown {scenario.cooldown} должен быть "
+                "неотрицательным конечным числом"
+            )
+
+    def _check_pattern(
+        self,
+        scenario: Scenario,
+        pattern: tuple[PatternStep | SilenceStep, ...],
+        patterns: set[tuple[tuple[str, float, float], ...]],
+    ) -> None:
+        """Checks one pattern of the scenario.
+
+        Args:
+            scenario: the scenario.
+            pattern: its pattern.
+            patterns: keys of the patterns checked before; the pattern's key is added here.
+        """
+        if not pattern:
+            raise ValueError(f"сценарий {scenario.name!r} содержит пустой шаблон")
+        tokens = [step_label(step) for step in pattern]
+        check_silences(scenario, pattern)
+        _check_gaps(scenario, pattern)
+        for step in pattern:
+            if step.min_score is not None and not unit_interval(step.min_score):
                 raise ValueError(
-                    f"сценарий {scenario.name!r}: max_gap {scenario.max_gap} должен быть "
-                    "положительным конечным числом"
+                    f"сценарий {scenario.name!r}: min_score {step.min_score} у шага "
+                    f"{step_label(step)!r} должен быть в [0, 1]"
                 )
-            if scenario.min_score is not None and not unit_interval(scenario.min_score):
-                raise ValueError(
-                    f"сценарий {scenario.name!r}: min_score {scenario.min_score} должен быть в [0, 1]"
-                )
-            if scenario.min_confidence is not None and not unit_interval(scenario.min_confidence):
-                raise ValueError(
-                    f"сценарий {scenario.name!r}: min_confidence {scenario.min_confidence} должен "
-                    "быть в [0, 1]"
-                )
-            if scenario.hold is not None and not non_negative_finite(scenario.hold):
-                raise ValueError(
-                    f"сценарий {scenario.name!r}: hold {scenario.hold} должен быть "
-                    "неотрицательным конечным числом"
-                )
-            if scenario.order not in ORDERS:
-                raise ValueError(
-                    f"сценарий {scenario.name!r}: order {scenario.order!r} должен быть "
-                    '"sequence" или "any"'
-                )
-            if not scenario.patterns:
-                raise ValueError(f"сценарий {scenario.name!r} не содержит шаблонов")
-            patterns: set[tuple[tuple[str, float, float], ...]] = set()
-            for pattern in scenario.patterns:
-                if not pattern:
-                    raise ValueError(f"сценарий {scenario.name!r} содержит пустой шаблон")
-                tokens = [step_label(step) for step in pattern]
-                check_silences(scenario, pattern)
-                if scenario.order == "any":
-                    for step in pattern:
-                        if step.max_gap is not None:
-                            raise ValueError(
-                                f"сценарий {scenario.name!r}: max_gap у шага {step.token!r} не "
-                                'задаётся при order "any" — задержка одна на сценарий и считается '
-                                "между соседними по времени шагами"
-                            )
-                elif pattern[0].max_gap is not None:
-                    raise ValueError(
-                        f"сценарий {scenario.name!r}: max_gap у первого шага {pattern[0].token!r} "
-                        "не задаётся — новое совпадение задержку не проверяет"
-                    )
-                for step in pattern[1:]:
-                    if isinstance(step, SilenceStep):
-                        continue
-                    if step.max_gap is not None and not positive_finite(step.max_gap):
-                        raise ValueError(
-                            f"сценарий {scenario.name!r}: max_gap {step.max_gap} у шага "
-                            f"{step.token!r} должен быть положительным конечным числом"
-                        )
-                for step in pattern:
-                    if step.min_score is not None and not unit_interval(step.min_score):
-                        raise ValueError(
-                            f"сценарий {scenario.name!r}: min_score {step.min_score} у шага "
-                            f"{step_label(step)!r} должен быть в [0, 1]"
-                        )
-                # шаблоны сравниваются по токенам, действующим задержкам и порогам: шаг без max_gap и
-                # шаг с тем же max_gap, что у сценария, — один и тот же шаг
-                key = tuple(self.step_key(scenario, step) for step in pattern)
-                if scenario.order == "any":
-                    # [<дверь>, <звук>] и [<звук>, <дверь>] — один и тот же шаблон
-                    key = tuple(sorted(key))
-                if key in patterns:
-                    raise ValueError(f"сценарий {scenario.name!r}: шаблон {tokens} задан дважды")
-                patterns.add(key)
-                unknown = [
-                    token
-                    for step in pattern
-                    for token in step_tokens(step)
-                    if token not in self.vocabulary and token not in WILDCARDS
-                ]
-                if unknown:
-                    raise ValueError(f"сценарий {scenario.name!r}: токенов {unknown} нет в словаре")
-            if not (math.isfinite(scenario.cooldown) and scenario.cooldown >= 0):
-                raise ValueError(
-                    f"сценарий {scenario.name!r}: cooldown {scenario.cooldown} должен быть "
-                    "неотрицательным конечным числом"
-                )
+        # шаблоны сравниваются по токенам, действующим задержкам и порогам: шаг без max_gap и
+        # шаг с тем же max_gap, что у сценария, — один и тот же шаг
+        key = tuple(self.step_key(scenario, step) for step in pattern)
+        if scenario.order == "any":
+            # [<дверь>, <звук>] и [<звук>, <дверь>] — один и тот же шаблон
+            key = tuple(sorted(key))
+        if key in patterns:
+            raise ValueError(f"сценарий {scenario.name!r}: шаблон {tokens} задан дважды")
+        patterns.add(key)
+        unknown = [
+            token
+            for step in pattern
+            for token in step_tokens(step)
+            if token not in self.vocabulary and token not in WILDCARDS
+        ]
+        if unknown:
+            raise ValueError(f"сценарий {scenario.name!r}: токенов {unknown} нет в словаре")
 
     def gap(self, scenario: Scenario, step: PatternStep) -> float:
-        """Задержка шага: своя; если не задана — сценария; если нет и там — из корня."""
+        """Gap of the step: its own, else the scenario's, else the root's."""
         if step.max_gap is not None:
             return step.max_gap
         if scenario.max_gap is not None:
@@ -190,14 +201,14 @@ class RuleSet:
         return self.max_gap
 
     def step_key(self, scenario: Scenario, step: PatternStep | SilenceStep) -> tuple:
-        """Шаг с действующими задержкой и порогом: по нему сравниваются шаблоны."""
+        """Step with its effective gap and threshold: patterns are compared by it."""
         threshold = self.threshold(scenario, step)
         if isinstance(step, SilenceStep):
             return ("тишина", tuple(sorted(step.absent)), step.duration, step.before, threshold)
         return (step.token, self.gap(scenario, step), threshold)
 
     def threshold(self, scenario: Scenario, step: PatternStep | SilenceStep) -> float:
-        """Порог score шага: свой; если не задан — сценария; если нет и там — из корня."""
+        """Score threshold of the step: its own, else the scenario's, else the root's."""
         if step.min_score is not None:
             return step.min_score
         if scenario.min_score is not None:
@@ -205,28 +216,30 @@ class RuleSet:
         return self.min_score
 
     def confidence_threshold(self, scenario: Scenario) -> float:
-        """Порог общей уверенности сценария: свой; если не задан — из корня."""
+        """Confidence threshold of the scenario: its own, else the root's."""
         if scenario.min_confidence is not None:
             return scenario.min_confidence
         return self.min_confidence
 
     def hold_of(self, scenario: Scenario) -> float:
-        """Задержка выдачи сценария: своя; если не задана — из корня."""
+        """Release delay of the scenario in correction mode: its own, else the root's."""
         if scenario.hold is not None:
             return scenario.hold
         return self.hold
 
     @classmethod
     def from_dict(cls, data: dict) -> "RuleSet":
-        """Шаблон — список шагов, а не строка через пробел: в токене бывают пробелы.
+        """Builds rules from parsed JSON.
 
-        Шаг — строка с токеном, объект `{"token": ..., "max_gap": ..., "min_score": ...}` или
-        шаг-тишина `{"absent": [...], "for": ..., "before": ..., "min_score": ...}`. Токен `any` —
-        любой токен, `any_vac` — любой токен словаря; они годятся везде, где токен.
-        `max_gap` и `min_score` у шага и у сценария необязательны, `min_confidence`, `cooldown`,
-        `hold` и `order` сценария — тоже; `cooldown` по умолчанию 0, `order` — "sequence".
-        `self_correction` в корне обязателен; `hold` корня по умолчанию 0, списки маркеров —
-        пустые. Неизвестный ключ на любом уровне — ошибка.
+        A pattern is a list of steps, not a string: tokens may contain spaces. Optional keys
+        fall back to the scenario or root defaults; `self_correction` is required.
+
+        Args:
+            data: the parsed JSON object.
+
+        Raises:
+            ValueError: an unknown key or an invalid value.
+            KeyError: a required key is missing.
         """
         check_keys(data, RULES_KEYS, "корень правил")
         scenarios = tuple(parse_scenario(item) for item in data["scenarios"])
@@ -255,9 +268,9 @@ def non_negative_finite(value: float) -> bool:
 
 
 def check_markers(rules: RuleSet) -> None:
-    """Фразы-маркеры: непустые, из токенов словаря; одна фраза — в одном списке и один раз.
+    """Checks marker phrases: non-empty, of vocabulary tokens, each in one list and once.
 
-    Фраза может начинать фразу другого списка: «а» закрывает отрицание, «а нет» — поправка.
+    A phrase may begin a phrase of another list: «а» closes a negation, «а нет» corrects.
     """
     seen: dict[Phrase, str] = {}
     for key in MARKERS:
@@ -274,12 +287,13 @@ def check_markers(rules: RuleSet) -> None:
 
 
 def step_tokens(step: PatternStep | SilenceStep) -> tuple[str, ...]:
-    """Токены шага: его токен или запрещённые токены тишины."""
+    """Tokens of the step: its token or the forbidden tokens of a silence."""
     return step.absent if isinstance(step, SilenceStep) else (step.token,)
 
 
 def fits(expected: str, token: str, vocabulary: frozenset[str]) -> bool:
-    """Подходит ли токен события к токену шага: тот же токен, `any` или `any_vac` и токен словаря."""
+    """Whether an event token fits a step token: the same token, `any`, or `any_vac` and a
+    vocabulary token."""
     if expected == ANY:
         return True
     if expected == ANY_VOCABULARY:
@@ -288,10 +302,10 @@ def fits(expected: str, token: str, vocabulary: frozenset[str]) -> bool:
 
 
 def fitting(token: str, vocabulary: frozenset[str]) -> tuple[str, ...]:
-    """Токены шагов, к которым подходит токен события (`fits`): по ним ищут в индексах.
+    """Step tokens the event token fits (`fits`): the keys for index lookups.
 
-    Сам токен — только если он не `any` и не `any_vac`: события с таким токеном подходят
-    к шагу `any`, но не к шагу `any_vac` (в словаре их не бывает).
+    An event token `any` or `any_vac` fits only the step `any`: such tokens are never in the
+    vocabulary.
     """
     if token in WILDCARDS:
         return (ANY,)
@@ -301,7 +315,7 @@ def fitting(token: str, vocabulary: frozenset[str]) -> tuple[str, ...]:
 
 
 def step_label(step: PatternStep | SilenceStep) -> str:
-    """Шаг в сообщении об ошибке."""
+    """Step as shown in error messages."""
     if isinstance(step, SilenceStep):
         before = f", назад {step.before:g} с" if step.before else ""
         return f"тишина {list(step.absent)} {step.duration:g} с{before}"
@@ -309,7 +323,7 @@ def step_label(step: PatternStep | SilenceStep) -> str:
 
 
 def check_silences(scenario: Scenario, pattern: tuple[PatternStep | SilenceStep, ...]) -> None:
-    """Где бывает шаг-тишина и каким он должен быть."""
+    """Checks where silence steps stand and what they hold."""
     name = scenario.name
     if not any(isinstance(step, SilenceStep) for step in pattern):
         return
@@ -346,13 +360,40 @@ def check_silences(scenario: Scenario, pattern: tuple[PatternStep | SilenceStep,
             )
 
 
+def _check_gaps(scenario: Scenario, pattern: tuple[PatternStep | SilenceStep, ...]) -> None:
+    """Checks the step gaps (`max_gap`) of a pattern."""
+    if scenario.order == "any":
+        for step in pattern:
+            if step.max_gap is not None:
+                raise ValueError(
+                    f"сценарий {scenario.name!r}: max_gap у шага {step.token!r} не "
+                    'задаётся при order "any" — задержка одна на сценарий и считается '
+                    "между соседними по времени шагами"
+                )
+    elif pattern[0].max_gap is not None:
+        raise ValueError(
+            f"сценарий {scenario.name!r}: max_gap у первого шага {pattern[0].token!r} "
+            "не задаётся — новое совпадение задержку не проверяет"
+        )
+    for step in pattern[1:]:
+        if isinstance(step, SilenceStep):
+            continue
+        if step.max_gap is not None and not positive_finite(step.max_gap):
+            raise ValueError(
+                f"сценарий {scenario.name!r}: max_gap {step.max_gap} у шага "
+                f"{step.token!r} должен быть положительным конечным числом"
+            )
+
+
 def check_keys(item: dict, known: frozenset[str], where: str) -> None:
+    """Rejects keys of a JSON object other than `known`; `where` names it in the error."""
     unknown = sorted(item.keys() - known)
     if unknown:
         raise ValueError(f"{where}: неизвестные ключи {unknown}")
 
 
 def parse_scenario(item: dict) -> Scenario:
+    """Scenario from an item of `scenarios` in the JSON."""
     name = item["name"]
     check_keys(item, SCENARIO_KEYS, f"сценарий {name!r}")
     return Scenario(
@@ -368,7 +409,7 @@ def parse_scenario(item: dict) -> Scenario:
 
 
 def parse_phrases(items: list, key: str) -> tuple[Phrase, ...]:
-    """Список фраз-маркеров: фраза — список токенов, а не строка, как и шаблон."""
+    """Marker phrases from the JSON: a phrase is a list of tokens, like a pattern."""
     if not isinstance(items, list) or not all(
         isinstance(phrase, list) and all(isinstance(token, str) for token in phrase)
         for phrase in items
@@ -378,6 +419,7 @@ def parse_phrases(items: list, key: str) -> tuple[Phrase, ...]:
 
 
 def parse_step(scenario: str, item: str | dict) -> PatternStep | SilenceStep:
+    """Pattern step from the JSON: a token string, a step object or a silence object."""
     if isinstance(item, str):
         return PatternStep(item, None, None)
     if "absent" in item:
@@ -403,4 +445,5 @@ def parse_step(scenario: str, item: str | dict) -> PatternStep | SilenceStep:
 
 
 def load_rules(path: Path) -> RuleSet:
+    """Rules from a JSON file."""
     return RuleSet.from_dict(json.loads(path.read_text(encoding="utf-8")))
