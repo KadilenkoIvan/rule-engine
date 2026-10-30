@@ -1,9 +1,11 @@
-"""Контракт интерфейса: по нему `main.py` выбирает CLI или веб."""
+"""Interface contract: `main.py` picks the CLI or the web by it."""
 
 from typing import Protocol
 
 
 class Interface(Protocol):
+    """User interface started from the command line."""
+
     def run(self, argv: list[str]) -> int:
-        """Разбирает свои аргументы командной строки и работает до конца; возвращает код выхода."""
+        """Parses its command line arguments and runs to the end; returns the exit code."""
         ...

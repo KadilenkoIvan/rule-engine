@@ -1,7 +1,7 @@
-"""View-модели: чистые данные, которые интерфейсы показывают каждый по-своему.
+"""View models: plain data that each interface shows its own way.
 
-Объектов домена здесь нет: CLI печатает граф деревом, веб рисует его в SVG, и обоим не нужно
-знать, как устроены вершины и совпадения внутри движка.
+No domain objects here: the CLI prints the graph as a tree, the web draws it as SVG, and
+neither needs to know engine internals.
 """
 
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ from typing import NamedTuple
 
 
 class TokenEdge(NamedTuple):
-    """Ребро-токен. Задержка и порог — `None`, если совпадают с корнем правил."""
+    """Token edge; gap and threshold are None when equal to the root rules'."""
 
     token: str
     max_gap: float | None  # у ребра из корня всегда None: новое совпадение задержку не проверяет
@@ -17,7 +17,7 @@ class TokenEdge(NamedTuple):
 
 
 class SilenceEdge(NamedTuple):
-    """Ребро-тишина. Порог — `None`, если совпадает с корнем правил."""
+    """Silence edge; the threshold is None when equal to the root rules'."""
 
     tokens: tuple[str, ...]  # запрещённые токены, по алфавиту
     duration: float  # секунды вперёд
@@ -27,6 +27,8 @@ class SilenceEdge(NamedTuple):
 
 @dataclass(frozen=True)
 class NodeView:
+    """Node of the logical trie with the edge into it."""
+
     id: int  # номер вершины; по нему снимок совпадений ссылается на граф
     edge: TokenEdge | SilenceEdge  # ребро, которое ведёт в вершину
     scenario: str | None  # сценарий, чей шаблон кончается в вершине
@@ -34,12 +36,14 @@ class NodeView:
 
 
 class SlotView(NamedTuple):
+    """Step of an `any` pattern."""
+
     token: str
     min_score: float | None  # None — как в корне правил
 
 
 class SetView(NamedTuple):
-    """Шаблон `any`."""
+    """`any` pattern."""
 
     id: int  # номер шаблона; по нему снимок совпадений ссылается на граф
     scenario: str
@@ -49,12 +53,16 @@ class SetView(NamedTuple):
 
 @dataclass(frozen=True)
 class GraphView:
+    """Graph of the rules: the trie, the `any` patterns and the vocabulary."""
+
     roots: tuple[NodeView, ...]  # вершины за рёбрами из корня
     sets: tuple[SetView, ...]
     vocabulary: tuple[str, ...]  # по алфавиту
 
 
 class EventView(NamedTuple):
+    """Stream event."""
+
     position: int  # сквозной номер события в потоке
     token: str
     score: float
@@ -62,6 +70,8 @@ class EventView(NamedTuple):
 
 
 class MatchView(NamedTuple):
+    """Fired scenario."""
+
     scenario: str
     steps: tuple[EventView, ...]
     confidence: float
@@ -69,7 +79,7 @@ class MatchView(NamedTuple):
 
 
 class HeldView(NamedTuple):
-    """Сработавший сценарий, чья выдача ждёт срока (режим поправок)."""
+    """Fired scenario whose release waits (correction mode)."""
 
     scenario: str
     steps: tuple[EventView, ...]
@@ -79,7 +89,7 @@ class HeldView(NamedTuple):
 
 
 class WaitingView(NamedTuple):
-    """Частичное совпадение, которое ждёт продолжения."""
+    """Partial match waiting for a continuation."""
 
     # "node" — в вершине бора, "set" — в наборе `any`, "silence" — в окне тишины
     kind: str
@@ -91,11 +101,9 @@ class WaitingView(NamedTuple):
 
 
 class MissView(NamedTuple):
-    """Почему событие не продвинуло совпадение или не дало сработать сценарию.
+    """Why an event did not advance a match or let a scenario fire.
 
-    `reason` и смысл `need` и `got` — как у `Miss` в движке: `"score"`, `"late"`, `"expired"`,
-    `"pruned"`, `"silence"`, `"confidence"`, `"repeat"`, `"cooldown"`, `"corrected"`,
-    `"negated"`.
+    `reason`, `need` and `got` mean the same as in `Miss` of the engine.
     """
 
     reason: str
@@ -110,7 +118,7 @@ class MissView(NamedTuple):
 
 @dataclass(frozen=True)
 class Frame:
-    """Состояние после события или после конца окна тишины, когда время прошло без события."""
+    """State after an event, or after a deadline passed without an event."""
 
     time: float  # секунды: время события или конец окна
     event: EventView | None  # None — кадр по таймеру
